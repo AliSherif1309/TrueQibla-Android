@@ -2,6 +2,7 @@ package com.aly.trueqibla
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
@@ -15,6 +16,7 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -94,7 +96,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var noFixSince = 0L
 
     // indoor averaging: one "bucket" per second of usable readings, each a direction estimate
-    private class Bucket(val x: Double, val y: Double, val w: Double, val b: Double, val dip: Double)
+    private class Bucket(val x: Double, val y: Double, val w: Double, val b: Double, val dip: Double, val good: Boolean)
     private val buckets = ArrayDeque<Bucket>()
     private var accX = 0.0
     private var accY = 0.0
@@ -102,6 +104,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var accB = 0.0
     private var accDip = 0.0
     private var accN = 0
+    private var accAllGood = true
     private var bucketStart = 0L
     private var avgSpots = 0
     private var goodSince = 0L
@@ -124,7 +127,14 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var meter: MeterView
     private lateinit var meterTv: TextView
     private lateinit var infoTv: TextView
-    private lateinit var vibBtn: TextView
+    private lateinit var mainView: LinearLayout
+    private lateinit var settingsView: LinearLayout
+    private lateinit var scroll: ScrollView
+
+    // settings
+    private val prefs by lazy { getSharedPreferences("qibla", MODE_PRIVATE) }
+    private var method = "smart"        // smart | strict | average
+    private var detailed = false        // simple | detailed view
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -142,8 +152,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private fun f1(x: Double) = String.format(Locale.US, "%.1f", x)
     private fun f5(x: Double) = String.format(Locale.US, "%.5f", x)
 
+    /** Theme chosen in Settings: system (default) / light / dark. */
     private val dark: Boolean by lazy {
-        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        when (prefs.getString("theme", "system")) {
+            "dark" -> true
+            "light" -> false
+            else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        }
     }
     private val BG by lazy { Color.parseColor(if (dark) "#0F1513" else "#F4F1EA") }
     private val INK by lazy { Color.parseColor(if (dark) "#E9EEEB" else "#1D2421") }
@@ -177,8 +192,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             getSystemService(VibratorManager::class.java)?.defaultVibrator
         else getSystemService(VIBRATOR_SERVICE) as? Vibrator
 
-        val prefs = getSharedPreferences("qibla", MODE_PRIVATE)
         vibOn = prefs.getBoolean("vib", true)
+        method = prefs.getString("method", "smart") ?: "smart"
+        detailed = prefs.getString("view", "simple") == "detailed"
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -191,15 +207,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             text = t("True Qibla", "القبلة الدقيقة"); textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(INK)
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         header.addView(TextView(this).apply {
-            text = if (ar) "English" else "العربية"
+            text = t("⚙ Settings", "⚙ الإعدادات")
             textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN)
             setPadding(dp(14), dp(8), dp(14), dp(8))
             background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(dp(1), GREEN); cornerRadius = dp(18).toFloat() }
             isClickable = true
-            setOnClickListener {
-                getSharedPreferences("qibla", MODE_PRIVATE).edit().putString("lang", if (ar) "en" else "ar").apply()
-                recreate()
-            }
+            setOnClickListener { showSettings(true) }
         })
         root.addView(header)
 
@@ -228,34 +241,159 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         meter = MeterView(this).apply { trackColor = RING }
         root.addView(meter, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(4) })
 
-        vibBtn = TextView(this).apply {
-            textSize = 14f; setTextColor(INK); gravity = Gravity.CENTER
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(dp(1), RING); cornerRadius = dp(12).toFloat() }
-            isClickable = true
-            setOnClickListener {
-                vibOn = !vibOn
-                getSharedPreferences("qibla", MODE_PRIVATE).edit().putBoolean("vib", vibOn).apply()
-                updateVibBtn()
-                if (vibOn) pulse(40)
-            }
-        }
-        updateVibBtn()
-        root.addView(vibBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
-
         infoTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED); setLineSpacing(0f, 1.15f) }
         root.addView(infoTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
 
-        setContentView(ScrollView(this).apply { addView(root); setBackgroundColor(BG) })
+        mainView = root
+        settingsView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(28))
+            setBackgroundColor(BG)
+            layoutDirection = if (ar) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
+            visibility = View.GONE
+        }
+        buildSettings()
+        val both = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainView); addView(settingsView) }
+        scroll = ScrollView(this).apply { addView(both); setBackgroundColor(BG) }
+        setContentView(scroll)
+        if (savedInstanceState?.getBoolean("settingsOpen", false) == true) showSettings(true)
 
         // show the last saved position immediately (works offline); GPS refines it
         if (prefs.contains("lat")) setLocation(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), 0.0, -1f,
             t("last known position", "آخر موقع معروف"))
     }
 
-    private fun updateVibBtn() {
-        vibBtn.text = if (vibOn) t("📳 Vibration guidance: On", "📳 التوجيه بالاهتزاز: مُفعّل")
-                      else t("📴 Vibration guidance: Off", "📴 التوجيه بالاهتزاز: متوقف")
+    // ---------------------------------------------------------------- settings screen
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("settingsOpen", settingsView.visibility == View.VISIBLE)
+    }
+
+    @Deprecated("Deprecated in Java")
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (settingsView.visibility == View.VISIBLE) showSettings(false) else super.onBackPressed()
+    }
+
+    private fun showSettings(show: Boolean) {
+        settingsView.visibility = if (show) View.VISIBLE else View.GONE
+        mainView.visibility = if (show) View.GONE else View.VISIBLE
+        scroll.scrollTo(0, 0)
+    }
+
+    private fun sectionTitle(text: String) = TextView(this).apply {
+        this.text = text; textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(MUTED)
+        setPadding(dp(4), dp(18), dp(4), dp(6))
+    }
+
+    /** A group of choices; the selected one is highlighted. Each option: key, title, optional description. */
+    private fun choiceGroup(title: String, options: List<Triple<String, String, String?>>, current: String, onPick: (String) -> Unit) {
+        settingsView.addView(sectionTitle(title))
+        for ((key, label, desc) in options) {
+            val selected = key == current
+            val row = TextView(this).apply {
+                text = (if (selected) "●  " else "○  ") + label + (if (desc != null) "\n" + desc else "")
+                textSize = 15f
+                setTextColor(if (selected) GREEN else INK)
+                if (selected) setTypeface(typeface, Typeface.BOLD)
+                setLineSpacing(0f, 1.1f)
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                background = GradientDrawable().apply {
+                    setColor(if (selected) GREEN_SOFT else Color.TRANSPARENT)
+                    setStroke(dp(1), if (selected) GREEN else RING); cornerRadius = dp(12).toFloat()
+                }
+                isClickable = true
+                setOnClickListener { if (!selected) onPick(key) }
+            }
+            settingsView.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(6) })
+        }
+    }
+
+    private fun buildSettings() {
+        settingsView.removeAllViews()
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        top.addView(TextView(this).apply {
+            text = t("Settings", "الإعدادات"); textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(INK)
+        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        top.addView(TextView(this).apply {
+            text = t("✓ Done", "✓ تم"); textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(dp(1), GREEN); cornerRadius = dp(18).toFloat() }
+            isClickable = true
+            setOnClickListener { showSettings(false) }
+        })
+        settingsView.addView(top)
+
+        choiceGroup(t("METHOD", "طريقة التحديد"), listOf(
+            Triple("smart", t("Smart (recommended)", "ذكي (موصى به)"),
+                t("Uses a clean reading when there is one; indoors it averages readings around the room. Shows a quick approximate arrow while it works.",
+                  "يستخدم القراءة النظيفة إن وُجدت، وفي الداخل يدمج القراءات من أنحاء الغرفة. يعرض سهمًا تقريبيًا سريعًا أثناء العمل.")),
+            Triple("strict", t("Strict", "صارم"),
+                t("Shows the arrow only after finding a clean spot. Slower indoors, but never approximate.",
+                  "لا يعرض السهم إلا بعد إيجاد مكان نظيف. أبطأ في الداخل، لكنه ليس تقريبيًا أبدًا.")),
+            Triple("average", t("Room average", "متوسط الغرفة"),
+                t("Always combines several readings, even when one spot looks clean. Most robust inside buildings.",
+                  "يدمج دائمًا عدة قراءات حتى لو بدا المكان نظيفًا. الأكثر ثباتًا داخل المباني."))
+        ), method) { k ->
+            method = k; prefs.edit().putString("method", k).apply(); resetFix(); buildSettings()
+        }
+
+        choiceGroup(t("LANGUAGE", "اللغة"), listOf(
+            Triple("en", "English", null), Triple("ar", "العربية", null)
+        ), if (ar) "ar" else "en") { k -> prefs.edit().putString("lang", k).apply(); recreate() }
+
+        choiceGroup(t("THEME", "المظهر"), listOf(
+            Triple("system", t("Same as phone", "مثل الهاتف"), null),
+            Triple("light", t("Light", "فاتح"), null),
+            Triple("dark", t("Dark", "داكن"), null)
+        ), prefs.getString("theme", "system") ?: "system") { k -> prefs.edit().putString("theme", k).apply(); recreate() }
+
+        choiceGroup(t("VIEW", "طريقة العرض"), listOf(
+            Triple("simple", t("Simple", "بسيط"), t("Arrow and status only.", "السهم والحالة فقط.")),
+            Triple("detailed", t("Detailed", "مفصّل"), t("Also shows the magnetic field check, coordinates and the true-north correction.",
+                                                         "يعرض أيضًا فحص المجال المغناطيسي والإحداثيات وتصحيح الشمال الحقيقي."))
+        ), if (detailed) "detailed" else "simple") { k ->
+            detailed = k == "detailed"; prefs.edit().putString("view", k).apply(); buildSettings()
+        }
+
+        choiceGroup(t("VIBRATION GUIDANCE", "التوجيه بالاهتزاز"), listOf(
+            Triple("on", t("On", "مُفعّل"), t("Ticks get faster as you turn toward the Qibla, then a double buzz.",
+                                              "نبضات تتسارع كلما اقتربت من القبلة، ثم اهتزازة مزدوجة.")),
+            Triple("off", t("Off", "متوقف"), null)
+        ), if (vibOn) "on" else "off") { k ->
+            vibOn = k == "on"; prefs.edit().putBoolean("vib", vibOn).apply(); if (vibOn) pulse(40); buildSettings()
+        }
+
+        // About
+        settingsView.addView(sectionTitle(t("ABOUT", "حول التطبيق")))
+        val ver = try {
+            val pi = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
+            "${pi.versionName} (build $code)"
+        } catch (_: Exception) { "" }
+        settingsView.addView(TextView(this).apply {
+            text = t("True Qibla $ver\n\nPoints to the Kaaba using the great-circle direction from your GPS position, corrected to true north. " +
+                       "The gyroscope keeps the arrow steady, and the magnetic field is checked against Earth's expected field at your location, " +
+                       "so the app knows when nearby metal makes the compass unreliable.\n\nFree and open source (MIT License). No ads, no tracking.",
+                     "القبلة الدقيقة $ver\n\nيشير إلى الكعبة باتجاه الدائرة العظمى من موقعك عبر GPS، مع التصحيح إلى الشمال الحقيقي. " +
+                       "يحافظ الجيروسكوب على ثبات السهم، ويُقارَن المجال المغناطيسي بمجال الأرض المتوقع في موقعك، " +
+                       "فيعرف التطبيق متى تجعل المعادن القريبة البوصلة غير موثوقة.\n\nمجاني ومفتوح المصدر (رخصة MIT). بلا إعلانات ولا تتبّع.")
+            textSize = 14f; setTextColor(INK); setLineSpacing(0f, 1.15f); setPadding(dp(4), 0, dp(4), 0)
+        })
+        settingsView.addView(TextView(this).apply {
+            text = t("Source code on GitHub ↗", "الشيفرة المصدرية على GitHub ↗")
+            textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN); setPadding(dp(4), dp(14), dp(4), dp(8))
+            isClickable = true
+            setOnClickListener {
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/AliSherif1309/TrueQibla-Android"))) } catch (_: Exception) {}
+            }
+        })
+    }
+
+    /** Forget the current direction (e.g. after changing the method) and find it again. */
+    private fun resetFix() {
+        offset = null; src = Src.NONE; buckets.clear(); goodSince = 0L; fairSince = 0L; noFixSince = 0L; smX = Double.NaN
     }
 
     private fun pulse(ms: Long) {
@@ -410,7 +548,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         lastFuse = now
         val follow = 1.0 - exp(-dt / 1.5)                // follow the compass with a ~1.5 s time constant
 
-        if (quality == Q.GOOD && calibrated()) {
+        // "Room average" never trusts a single spot, so a clean reading is treated like any other sample.
+        val usableSingle = quality == Q.FAIR || (quality == Q.GOOD && method == "average")
+        if (quality == Q.GOOD && calibrated() && method != "average") {
             if (goodSince == 0L) goodSince = now
             fairSince = 0L
             val o = offset
@@ -423,13 +563,15 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         } else {
             goodSince = 0L
             // Quick first arrow: accept a "fair" reading after 2 s, clearly labelled approximate.
-            if (quality == Q.FAIR && calibrated() && src == Src.NONE) {
+            if (method == "strict") {
+                fairSince = 0L                                       // strict: wait for a clean spot only
+            } else if (usableSingle && calibrated() && src == Src.NONE) {
                 if (fairSince == 0L) fairSince = now
                 if (now - fairSince > 2000) { offset = d; src = Src.FAIR }
-            } else if (quality == Q.FAIR && calibrated() && src == Src.FAIR) {
-                val o = offset!!
+            } else if (usableSingle && calibrated() && src == Src.FAIR) {
+                val o = offset ?: d
                 offset = Astro.norm180(o + follow * Astro.norm180(d - o))
-            } else if (quality != Q.FAIR) fairSince = 0L
+            } else if (!usableSingle) fairSince = 0L
             // BAD: ignore the compass completely; the gyroscope keeps the last good direction.
         }
         collectForAverage(d, now)
@@ -448,17 +590,18 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             val w = 1.0 / ((se / 0.07) * (se / 0.07) + (de / 4.0) * (de / 4.0) + 0.2)
             accX += w * cos(Math.toRadians(d)); accY += w * sin(Math.toRadians(d)); accW += w
             accB += bStrength; accDip += bDip; accN++
+            if (quality != Q.GOOD) accAllGood = false
         }
         if (bucketStart == 0L) bucketStart = now
         if (now - bucketStart < 1000) return
         bucketStart = now
         if (accN >= 5 && accW > 0) {
             val r = sqrt(accX * accX + accY * accY)
-            if (r > 0) buckets.addLast(Bucket(accX / r, accY / r, accW / accN, accB / accN, accDip / accN))
+            if (r > 0) buckets.addLast(Bucket(accX / r, accY / r, accW / accN, accB / accN, accDip / accN, accAllGood))
             while (buckets.size > 40) buckets.removeFirst()
         }
-        accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0
-        if (src == Src.GOOD || buckets.size < 5) return
+        accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0; accAllGood = true
+        if (method == "strict" || src == Src.GOOD || buckets.size < 5) return
         // the readings must come from different spots (the field values must differ), not one spot repeated
         val bs = buckets.map { it.b }
         val ds = buckets.map { it.dip }
@@ -469,7 +612,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val spread = Math.toDegrees(sqrt(-2.0 * kotlin.math.ln(rbar)))
         val stdErr = spread / sqrt(buckets.size.toDouble())
         avgSpots = buckets.size
-        if (diverse && stdErr < 2.0) {
+        // accept when readings come from varied spots, or (outdoors / clean room) when every reading was clean
+        if ((diverse || buckets.all { it.good }) && stdErr < 2.0) {
             offset = Astro.norm180(Math.toDegrees(atan2(sy, sx)))
             src = Src.AVG
         }
@@ -542,6 +686,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                            else t("Magnetic field check: measuring…", "فحص المجال المغناطيسي: جارٍ القياس…")
         }
         meter.invalidate()
+        val showMeter = detailed || quality != Q.GOOD || src != Src.GOOD
+        meter.visibility = if (showMeter) View.VISIBLE else View.GONE
+        meterTv.visibility = meter.visibility
+        infoTv.visibility = if (detailed) View.VISIBLE else View.GONE
 
         val raw = currentHeading()
         if (raw != null) noFixSince = 0L else if (noFixSince == 0L) noFixSince = now
@@ -567,6 +715,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                     turnTv.text = t("Interference here", "يوجد تشويش هنا")
                     setStatus(t("⚠ Something nearby is bending the magnetic field. Walk 1–2 m away from metal (cars, desks, steel doors or pillars, speakers, laptops). When the bar turns green, the spot is clean.",
                                 "⚠ شيء قريب يُشوّه المجال المغناطيسي. ابتعد مترًا أو مترين عن المعادن (السيارات، المكاتب، الأبواب أو الأعمدة الحديدية، السماعات، الحواسيب). عندما يصبح الشريط أخضر يكون المكان نظيفًا."), RED, RED_SOFT)
+                }
+                method == "strict" && quality == Q.FAIR -> {
+                    turnTv.text = t("Waiting for a clean spot…", "بانتظار مكان نظيف…")
+                    setStatus(t("Strict mode: the arrow appears only where the field is clean (green bar). Move slowly away from metal, or toward a window.",
+                                "الوضع الصارم: يظهر السهم فقط حيث يكون المجال نظيفًا (شريط أخضر). تحرّك ببطء بعيدًا عن المعادن أو نحو نافذة."), ORANGE, ORANGE_SOFT)
                 }
                 else -> {
                     turnTv.text = t("Checking the magnetic field…", "جارٍ فحص المجال المغناطيسي…")
@@ -598,7 +751,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             aligned = ok
 
             val approx = src == Src.FAIR && gameSensor != null
-            val spots = spotsSeen()
+            val spots = if (buckets.isNotEmpty() && buckets.all { it.good }) buckets.size else spotsSeen()
             when {
                 !calibrated() -> setStatus(t("Holding the last good direction. Wave the phone in a figure‑8 to recalibrate the compass.",
                                              "يتم الاحتفاظ بآخر اتجاه دقيق. حرّك الهاتف على شكل الرقم 8 لإعادة معايرة البوصلة."), ORANGE, ORANGE_SOFT)

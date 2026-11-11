@@ -14,10 +14,17 @@
 ## Indoors
 Inside buildings, steel bends the magnetic field a little almost everywhere. The app averages readings taken at different spots as you walk slowly around the room. The errors at each spot point in different directions and largely cancel, so a usable, accurate direction comes quickly even when no single spot is perfectly clean.
 
+## Settings
+- **Method**: Smart (default), Strict (arrow only at a clean spot), or Room average (always combines several readings).
+- **Language**: English / العربية.
+- **Theme**: same as phone, light or dark.
+- **View**: Simple (arrow and status) or Detailed (field check, coordinates, true-north correction).
+- **Vibration guidance**: on or off.
+
 ## Features
 - Opens straight to the arrow. Nothing to set up.
-- **Arabic / English** switch inside the app (right-to-left layout for Arabic). It's remembered, whatever the phone's language.
-- **Dark mode**, following the phone's setting.
+- **Arabic / English**, with right-to-left layout for Arabic.
+- **Dark mode**.
 - **Vibration guidance**: ticks get faster as you turn toward the Qibla, then a double buzz when you face it. It can be switched off.
 - Works offline. No ads, no tracking, no internet permission, and no external libraries.
 
