@@ -23,3 +23,6 @@ Kotlin, single screen, no dependencies. Every push to `main` builds a signed APK
 
 Release signing uses these repository secrets (never commit the keystore):
 `SIGNING_KEYSTORE_BASE64`, `SIGNING_STORE_PASSWORD`, `SIGNING_KEY_PASSWORD`, `SIGNING_KEY_ALIAS`.
+
+## License
+[MIT](LICENSE): free to use, share and improve. Please keep the copyright notice.
