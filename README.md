@@ -26,6 +26,9 @@ Inside buildings, steel bends the magnetic field a little almost everywhere. The
 - **Arabic / English**, with right-to-left layout for Arabic.
 - **Dark mode**.
 - **Vibration guidance**: ticks get faster as you turn toward the Qibla, then a double buzz when you face it. It can be switched off.
+- **Sun over the Kaaba (رصد القبلة)**: on the two days a year when the sun passes over the Kaaba, a card shows the exact time, when every shadow points straight away from the Qibla. An optional reminder is in Settings.
+- **Prayer-mat mode**: a dark, dimmed screen showing only the arrow, with no vibration. Tap to exit.
+- **Mini globe** (Detailed view): the shortest path over the Earth from you to Makkah, with the distance.
 - Works offline. No ads, no tracking, no internet permission, and no external libraries.
 
 ## How it's built

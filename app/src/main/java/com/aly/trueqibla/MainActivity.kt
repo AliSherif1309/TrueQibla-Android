@@ -29,9 +29,13 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.asin
@@ -142,6 +146,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var mainView: LinearLayout
     private lateinit var settingsView: LinearLayout
     private lateinit var scroll: ScrollView
+    private lateinit var sunCard: TextView
+    private lateinit var globe: GlobeView
+    private lateinit var matBtn: TextView
+    private lateinit var matOverlay: FrameLayout
+    private lateinit var matDial: QiblaView
+    private lateinit var matTv: TextView
+    private var matMode = false
 
     // settings
     private val prefs by lazy { getSharedPreferences("qibla", MODE_PRIVATE) }
@@ -229,6 +240,18 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         })
         root.addView(header)
 
+        // "sun over the Kaaba" card: only shown around those two days a year
+        sunCard = TextView(this).apply {
+            textSize = 14.5f; setTextColor(INK); setLineSpacing(0f, 1.15f)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor(if (dark) "#3A3015" else "#FFF4D6")); setStroke(dp(1), Color.parseColor("#D4A63A"))
+                cornerRadius = dp(12).toFloat()
+            }
+            visibility = View.GONE
+        }
+        root.addView(sunCard, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(12) })
+
         qView = QiblaView(this).apply {
             faceColor = Color.parseColor(if (dark) "#121A17" else "#FBFAF7")
             tickColor = Color.parseColor(if (dark) "#3A4743" else "#B8B2A5")
@@ -249,6 +272,16 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         root.addView(statusTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) })
 
+        matBtn = TextView(this).apply {
+            text = t("🕌 Prayer-mat mode", "🕌 وضع سجادة الصلاة")
+            textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN); gravity = Gravity.CENTER
+            setPadding(dp(14), dp(11), dp(14), dp(11))
+            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(dp(1), GREEN); cornerRadius = dp(12).toFloat() }
+            isClickable = true
+            setOnClickListener { setMatMode(true) }
+        }
+        root.addView(matBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) })
+
         avgTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED) }
         root.addView(avgTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
         avgMeter = MeterView(this).apply { trackColor = RING }
@@ -261,6 +294,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
         infoTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED); setLineSpacing(0f, 1.15f) }
         root.addView(infoTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
+        globe = GlobeView(this).apply {
+            if (dark) { oceanColor = Color.parseColor("#14262A"); gridColor = Color.parseColor("#22393D"); edgeColor = Color.parseColor("#2F4B50") }
+            pathColor = GREEN; textColor = MUTED
+        }
+        root.addView(globe, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) })
 
         mainView = root
         settingsView = LinearLayout(this).apply {
@@ -273,7 +311,36 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         buildSettings()
         val both = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainView); addView(settingsView) }
         scroll = ScrollView(this).apply { addView(both); setBackgroundColor(BG) }
-        setContentView(scroll)
+
+        // prayer-mat mode: dark full screen, dim live arrow, no vibration; tap anywhere to exit
+        matDial = QiblaView(this).apply {
+            faceColor = Color.BLACK; tickColor = Color.parseColor("#1E2A26"); markerColor = Color.parseColor("#3A4743")
+            arrowColor = Color.parseColor("#2E8F66"); ringColor = Color.parseColor("#1A2420")
+        }
+        matTv = TextView(this).apply {
+            textSize = 15f; setTextColor(Color.parseColor("#55625C")); gravity = Gravity.CENTER
+        }
+        val matCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            addView(matDial, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(matTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(18) })
+            addView(TextView(this@MainActivity).apply {
+                text = t("Tap anywhere to exit", "اضغط في أي مكان للخروج"); textSize = 13f
+                setTextColor(Color.parseColor("#3A4743")); gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) })
+        }
+        matOverlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            visibility = View.GONE
+            isClickable = true
+            setOnClickListener { setMatMode(false) }
+            addView(matCol, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+        setContentView(FrameLayout(this).apply {
+            addView(scroll, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(matOverlay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        })
         if (savedInstanceState?.getBoolean("settingsOpen", false) == true) showSettings(true)
 
         // show the last saved position immediately (works offline); GPS refines it
@@ -291,7 +358,24 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     @Deprecated("Deprecated in Java")
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        if (settingsView.visibility == View.VISIBLE) showSettings(false) else super.onBackPressed()
+        when {
+            matMode -> setMatMode(false)
+            settingsView.visibility == View.VISIBLE -> showSettings(false)
+            else -> super.onBackPressed()
+        }
+    }
+
+    private fun setMatMode(on: Boolean) {
+        matMode = on
+        matOverlay.visibility = if (on) View.VISIBLE else View.GONE
+        val lp = window.attributes
+        lp.screenBrightness = if (on) 0.03f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = lp
+    }
+
+    private fun fmtEvent(ms: Long): String {
+        val loc = if (ar) Locale.forLanguageTag("ar") else Locale.US
+        return DateTimeFormatter.ofPattern("EEEE d MMMM yyyy · HH:mm", loc).format(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()))
     }
 
     private fun showSettings(show: Boolean) {
@@ -383,6 +467,28 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             vibOn = k == "on"; prefs.edit().putBoolean("vib", vibOn).apply(); if (vibOn) pulse(40); buildSettings()
         }
 
+        // Sun over the Kaaba
+        val events = Astro.nextSunOverKaaba(System.currentTimeMillis())
+        settingsView.addView(sectionTitle(t("SUN OVER THE KAABA", "الشمس فوق الكعبة")))
+        settingsView.addView(TextView(this).apply {
+            text = t("Twice a year the sun is directly over the Kaaba. At that minute every vertical shadow, wherever the sun is up, points exactly away from the Qibla — a natural check that needs no phone.\n\nNext:\n",
+                     "مرتين في السنة تكون الشمس فوق الكعبة مباشرة. في تلك الدقيقة يشير ظل أي شيء عمودي، حيثما كانت الشمس ظاهرة، بعكس اتجاه القبلة تمامًا — طريقة طبيعية للتحقق لا تحتاج إلى هاتف.\n\nالموعد القادم:\n") +
+                events.joinToString("\n") { "• " + fmtEvent(it) }
+            textSize = 14f; setTextColor(INK); setLineSpacing(0f, 1.15f); setPadding(dp(4), 0, dp(4), dp(8))
+        })
+        choiceGroup(t("Reminder", "التذكير"), listOf(
+            Triple("on", t("Remind me", "ذكّرني"), t("The evening before, and 15 minutes before.", "في المساء السابق، وقبل الموعد بـ 15 دقيقة.")),
+            Triple("off", t("No reminder", "بدون تذكير"), null)
+        ), if (Reminders.enabled(this)) "on" else "off") { k ->
+            prefs.edit().putBoolean("remind", k == "on").apply()
+            if (k == "on" && Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
+            }
+            Reminders.scheduleNext(this)
+            buildSettings()
+        }
+
         // About
         settingsView.addView(sectionTitle(t("ABOUT", "حول التطبيق")))
         val ver = try {
@@ -436,6 +542,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         magSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         linSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         startLocation()
+        Reminders.scheduleNext(this)
         handler.post(ticker)
     }
 
@@ -471,6 +578,14 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 2) {
+            if (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+                prefs.edit().putBoolean("remind", false).apply()   // can't notify without permission
+                Reminders.scheduleNext(this)
+                buildSettings()
+            }
+            return
+        }
         startLocation()
     }
 
@@ -691,7 +806,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     /** Vibration guidance: short ticks that get faster as you turn toward the Qibla, a double buzz on arrival. */
     private fun guide(diff: Double, trustworthy: Boolean, now: Long) {
-        if (!vibOn || !trustworthy) return
+        if (!vibOn || !trustworthy || matMode) return
         val a = abs(diff)
         if (a <= 2.0) {
             if (!aligned) { pulse(70); handler.postDelayed({ pulse(70) }, 160) }
@@ -729,8 +844,29 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
     }
 
+    private fun renderSunCard(now: Long) {
+        val ev = Astro.nextSunOverKaaba(now, 15 * 60_000L).firstOrNull()
+        val show = ev != null && ev - now < 36 * 3600_000L && (lat.isNaN() || Astro.sun(ev, lat, lon).second > 5)
+        sunCard.visibility = if (show && !matMode) View.VISIBLE else View.GONE
+        if (!show || ev == null) return
+        val time = DateTimeFormatter.ofPattern("HH:mm", Locale.US).format(Instant.ofEpochMilli(ev).atZone(ZoneId.systemDefault()))
+        val mins = (ev - now) / 60_000L
+        val today = Instant.ofEpochMilli(ev).atZone(ZoneId.systemDefault()).toLocalDate() == Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
+        sunCard.text = when {
+            abs(ev - now) <= 10 * 60_000L -> t("☀️ NOW: the sun is over the Kaaba. Every vertical shadow points exactly AWAY from the Qibla — compare it with the arrow!",
+                                               "☀️ الآن: الشمس فوق الكعبة. ظل أي شيء عمودي يشير بعكس اتجاه القبلة تمامًا — قارنه بالسهم!")
+            mins in 1..90 -> t("☀️ In $mins min ($time) the sun will be over the Kaaba: shadows will point exactly away from the Qibla.",
+                               "☀️ بعد $mins دقيقة ($time) تكون الشمس فوق الكعبة: ستشير الظلال بعكس اتجاه القبلة تمامًا.")
+            today -> t("☀️ Today at $time the sun is over the Kaaba. At that minute every shadow points exactly away from the Qibla — a natural check.",
+                       "☀️ اليوم الساعة $time تكون الشمس فوق الكعبة. في تلك الدقيقة يشير كل ظل بعكس اتجاه القبلة تمامًا — للتحقق الطبيعي.")
+            else -> t("☀️ Tomorrow at $time the sun is over the Kaaba — every shadow will point exactly away from the Qibla.",
+                      "☀️ غدًا الساعة $time تكون الشمس فوق الكعبة — سيشير كل ظل بعكس اتجاه القبلة تمامًا.")
+        }
+    }
+
     private fun render() {
         val now = System.currentTimeMillis()
+        renderSunCard(now)
         if (lat.isNaN()) {
             qView.qiblaRel = null; qView.invalidate()
             turnTv.text = t("Finding your location…", "جارٍ تحديد موقعك…")
@@ -762,12 +898,20 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         meter.visibility = if (showMeter) View.VISIBLE else View.GONE
         meterTv.visibility = meter.visibility
         infoTv.visibility = if (detailed) View.VISIBLE else View.GONE
+        globe.visibility = if (detailed) View.VISIBLE else View.GONE
+        if (detailed && (globe.userLat != lat || globe.userLon != lon)) {
+            globe.userLat = lat; globe.userLon = lon
+            globe.label = t("Shortest path over the Earth to Makkah · ", "أقصر طريق على سطح الأرض إلى مكة · ") +
+                String.format(Locale.US, "%,d", Astro.distanceKm(lat, lon).toInt()) + t(" km", " كم")
+            globe.invalidate()
+        }
         renderAverageBar()
 
         val raw = currentHeading()
         if (raw != null) noFixSince = 0L else if (noFixSince == 0L) noFixSince = now
         if (raw == null) {
             qView.qiblaRel = null; qView.sunRel = null; qView.ringColor = RING; qView.invalidate()
+            matDial.qiblaRel = null; matDial.invalidate(); matTv.text = t("Finding the direction…", "جارٍ تحديد الاتجاه…")
             smX = Double.NaN
             aligned = false
             when {
@@ -806,6 +950,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             val h = Astro.norm360(Math.toDegrees(atan2(smY, smX)))
             val diff = Astro.norm180(q - h)
             qView.qiblaRel = diff.toFloat()
+            matDial.qiblaRel = diff.toFloat()
+            matDial.ringColor = Color.parseColor(if (abs(diff) <= 2.0) "#1F5C43" else "#1A2420")
+            matDial.invalidate()
+            matTv.text = if (abs(diff) <= 2.0) t("✓ Facing the Qibla", "✓ متجه إلى القبلة")
+                         else t("Turn ${abs(diff).toInt()}° ${if (diff > 0) "right" else "left"}", "استدر ${abs(diff).toInt()}° ${if (diff > 0) "يمينًا" else "يسارًا"}")
             val (sunAz, sunAlt) = Astro.sun(now, lat, lon)
             qView.sunRel = if (sunAlt > 0 && sunAlt < 80) Astro.norm180(sunAz - h).toFloat() else null
 
