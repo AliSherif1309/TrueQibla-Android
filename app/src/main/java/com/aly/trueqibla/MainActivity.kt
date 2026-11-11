@@ -3,6 +3,7 @@ package com.aly.trueqibla
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,17 +15,22 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.Gravity
-import android.view.HapticFeedbackConstants
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
@@ -45,6 +51,9 @@ import kotlin.math.sqrt
  *     (strength and dip angle, also from GeomagneticField). If they don't match, something nearby
  *     is bending the field: the compass is ignored and the gyroscope holds the last good direction,
  *     and the user is told to move.
+ *
+ * Arabic (with right-to-left layout) is used automatically when the phone language is Arabic,
+ * and the dark theme follows the phone's dark mode.
  */
 class MainActivity : Activity(), SensorEventListener, LocationListener {
 
@@ -55,6 +64,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var gameSensor: Sensor? = null
     private var rotSensor: Sensor? = null
     private var magSensor: Sensor? = null
+    private var vibrator: Vibrator? = null
 
     // location
     private var lat = Double.NaN
@@ -88,6 +98,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var smX = Double.NaN
     private var smY = Double.NaN
 
+    // vibration guidance
+    private var vibOn = true
+    private var lastPulse = 0L
+
     // views
     private lateinit var qView: QiblaView
     private lateinit var turnTv: TextView
@@ -95,47 +109,78 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var meter: MeterView
     private lateinit var meterTv: TextView
     private lateinit var infoTv: TextView
+    private lateinit var vibBtn: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() { render(); handler.postDelayed(this, 60) }
     }
 
-    private val GREEN = Color.parseColor("#127A52")
-    private val GREEN_SOFT = Color.parseColor("#E2F2EA")
-    private val ORANGE = Color.parseColor("#B5621A")
-    private val ORANGE_SOFT = Color.parseColor("#FBEEDD")
-    private val RED = Color.parseColor("#B23A3A")
-    private val RED_SOFT = Color.parseColor("#F8E3E3")
-    private val INK = Color.parseColor("#1D2421")
-    private val MUTED = Color.parseColor("#68716C")
+    // ---------------------------------------------------------------- language + theme
+
+    private val ar: Boolean by lazy { resources.configuration.locales[0].language == "ar" }
+    private fun t(en: String, arabic: String) = if (ar) arabic else en
+    private fun f1(x: Double) = String.format(Locale.US, "%.1f", x)
+    private fun f5(x: Double) = String.format(Locale.US, "%.5f", x)
+
+    private val dark: Boolean by lazy {
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+    }
+    private val BG by lazy { Color.parseColor(if (dark) "#0F1513" else "#F4F1EA") }
+    private val INK by lazy { Color.parseColor(if (dark) "#E9EEEB" else "#1D2421") }
+    private val MUTED by lazy { Color.parseColor(if (dark) "#9AA7A1" else "#68716C") }
+    private val GREEN by lazy { Color.parseColor(if (dark) "#3CC88F" else "#127A52") }
+    private val GREEN_SOFT by lazy { Color.parseColor(if (dark) "#16342A" else "#E2F2EA") }
+    private val ORANGE by lazy { Color.parseColor(if (dark) "#E7A15B" else "#B5621A") }
+    private val ORANGE_SOFT by lazy { Color.parseColor(if (dark) "#3A2A18" else "#FBEEDD") }
+    private val RED by lazy { Color.parseColor(if (dark) "#EF7B7B" else "#B23A3A") }
+    private val RED_SOFT by lazy { Color.parseColor(if (dark) "#3A1D1D" else "#F8E3E3") }
+    private val RING by lazy { Color.parseColor(if (dark) "#2A3531" else "#D9D4C8") }
 
     // ---------------------------------------------------------------- UI
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.statusBarColor = BG
+        window.navigationBarColor = BG
+        window.decorView.systemUiVisibility = if (dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+
         sm = getSystemService(SENSOR_SERVICE) as SensorManager
         lm = getSystemService(LOCATION_SERVICE) as LocationManager
         gameSensor = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
         rotSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         magSensor = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        vibrator = if (Build.VERSION.SDK_INT >= 31)
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        else getSystemService(VIBRATOR_SERVICE) as? Vibrator
+
+        val prefs = getSharedPreferences("qibla", MODE_PRIVATE)
+        vibOn = prefs.getBoolean("vib", true)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(24))
-            setBackgroundColor(Color.parseColor("#F4F1EA"))
+            setBackgroundColor(BG)
+            layoutDirection = if (ar) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
         }
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         header.addView(TextView(this).apply {
-            text = "True Qibla"; textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(INK)
+            text = t("True Qibla", "القبلة الدقيقة"); textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(INK)
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        header.addView(TextView(this).apply { text = "القبلة"; textSize = 24f; setTextColor(GREEN); setTypeface(typeface, Typeface.BOLD) })
+        if (!ar) header.addView(TextView(this).apply { text = "القبلة"; textSize = 24f; setTextColor(GREEN); setTypeface(typeface, Typeface.BOLD) })
         root.addView(header)
 
-        qView = QiblaView(this)
+        qView = QiblaView(this).apply {
+            faceColor = Color.parseColor(if (dark) "#121A17" else "#FBFAF7")
+            tickColor = Color.parseColor(if (dark) "#3A4743" else "#B8B2A5")
+            markerColor = INK
+            arrowColor = GREEN
+            ringColor = RING
+        }
         root.addView(qView, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(12) })
 
         turnTv = TextView(this).apply {
@@ -151,17 +196,41 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
         meterTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED) }
         root.addView(meterTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
-        meter = MeterView(this)
+        meter = MeterView(this).apply { trackColor = RING }
         root.addView(meter, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(4) })
+
+        vibBtn = TextView(this).apply {
+            textSize = 14f; setTextColor(INK); gravity = Gravity.CENTER
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(dp(1), RING); cornerRadius = dp(12).toFloat() }
+            isClickable = true
+            setOnClickListener {
+                vibOn = !vibOn
+                getSharedPreferences("qibla", MODE_PRIVATE).edit().putBoolean("vib", vibOn).apply()
+                updateVibBtn()
+                if (vibOn) pulse(40)
+            }
+        }
+        updateVibBtn()
+        root.addView(vibBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
 
         infoTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED); setLineSpacing(0f, 1.15f) }
         root.addView(infoTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
 
-        setContentView(ScrollView(this).apply { addView(root); setBackgroundColor(Color.parseColor("#F4F1EA")) })
+        setContentView(ScrollView(this).apply { addView(root); setBackgroundColor(BG) })
 
         // show the last saved position immediately (works offline); GPS refines it
-        val p = getSharedPreferences("qibla", MODE_PRIVATE)
-        if (p.contains("lat")) setLocation(p.getFloat("lat", 0f).toDouble(), p.getFloat("lon", 0f).toDouble(), 0.0, -1f, "last known position")
+        if (prefs.contains("lat")) setLocation(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), 0.0, -1f,
+            t("last known position", "آخر موقع معروف"))
+    }
+
+    private fun updateVibBtn() {
+        vibBtn.text = if (vibOn) t("📳 Vibration guidance: On", "📳 التوجيه بالاهتزاز: مُفعّل")
+                      else t("📴 Vibration guidance: Off", "📴 التوجيه بالاهتزاز: متوقف")
+    }
+
+    private fun pulse(ms: Long) {
+        try { vibrator?.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)) } catch (_: Exception) {}
     }
 
     override fun onResume() {
@@ -211,7 +280,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     override fun onLocationChanged(l: Location) {
         // keep the more accurate fix
         if (!lat.isNaN() && locAcc > 0 && l.accuracy > locAcc * 1.5f && l.accuracy > 30f) return
-        val label = (if (l.provider == LocationManager.GPS_PROVIDER) "GPS" else "Network") + " ±${l.accuracy.toInt()} m"
+        val src = if (l.provider == LocationManager.GPS_PROVIDER) "GPS" else t("Network", "الشبكة")
+        val label = "$src ±${l.accuracy.toInt()} ${t("m", "م")}"
         setLocation(l.latitude, l.longitude, if (l.hasAltitude()) l.altitude else 0.0, l.accuracy, label)
         if (l.provider == LocationManager.GPS_PROVIDER && l.accuracy <= 20f) {
             try { lm.removeUpdates(this) } catch (_: Exception) {}   // good enough: save battery
@@ -353,12 +423,25 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         statusTv.background = GradientDrawable().apply { setColor(bg); cornerRadius = dp(12).toFloat() }
     }
 
+    /** Vibration guidance: short ticks that get faster as you turn toward the Qibla, a double buzz on arrival. */
+    private fun guide(diff: Double, trustworthy: Boolean, now: Long) {
+        if (!vibOn || !trustworthy) return
+        val a = abs(diff)
+        if (a <= 2.0) {
+            if (!aligned) { pulse(70); handler.postDelayed({ pulse(70) }, 160) }
+        } else if (a < 40.0) {
+            val interval = (110 + (a / 40.0) * 1100).toLong()     // ~1.2 s far away → ~0.15 s close
+            if (now - lastPulse > interval) { pulse(15); lastPulse = now }
+        }
+    }
+
     private fun render() {
         val now = System.currentTimeMillis()
         if (lat.isNaN()) {
             qView.qiblaRel = null; qView.invalidate()
-            turnTv.text = "Finding your location…"
-            setStatus("Turn on Location (GPS) and allow it for True Qibla. Being outdoors or near a window helps.", ORANGE, ORANGE_SOFT)
+            turnTv.text = t("Finding your location…", "جارٍ تحديد موقعك…")
+            setStatus(t("Turn on Location (GPS) and allow it for True Qibla. Being outdoors or near a window helps.",
+                        "شغّل الموقع (GPS) واسمح للتطبيق باستخدامه. يساعد الوقوف في مكان مفتوح أو قرب نافذة."), ORANGE, ORANGE_SOFT)
             meterTv.text = ""; infoTv.text = ""
             return
         }
@@ -370,36 +453,40 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         if (fe != null) {
             val (se, de) = fe
             val frac = (1.0 - min(1.0, max(se / 0.25, de / 15.0))).toFloat()
+            val pct = (frac * 100).toInt()
             meter.fraction = frac
             meter.barColor = when (quality) { Q.GOOD -> GREEN; Q.FAIR -> ORANGE; else -> RED }
-            meterTv.text = "Magnetic field check: ${(frac * 100).toInt()}% match with Earth's field here" +
-                if (quality == Q.BAD) " — move slowly and watch this bar" else ""
+            meterTv.text = t("Magnetic field check: $pct% match with Earth's field here", "فحص المجال المغناطيسي: تطابق $pct٪ مع مجال الأرض هنا") +
+                if (quality == Q.BAD) t(" — move slowly and watch this bar", " — تحرّك ببطء وراقب هذا الشريط") else ""
         } else {
-            meter.fraction = 0f; meter.barColor = Color.GRAY
-            meterTv.text = if (magSensor == null) "This phone has no magnetometer." else "Magnetic field check: measuring…"
+            meter.fraction = 0f; meter.barColor = MUTED
+            meterTv.text = if (magSensor == null) t("This phone has no magnetometer.", "هذا الهاتف لا يحتوي على حسّاس مغناطيسي.")
+                           else t("Magnetic field check: measuring…", "فحص المجال المغناطيسي: جارٍ القياس…")
         }
         meter.invalidate()
 
         val raw = currentHeading()
         if (raw == null) {
-            qView.qiblaRel = null; qView.sunRel = null; qView.ringColor = Color.parseColor("#D9D4C8"); qView.invalidate()
+            qView.qiblaRel = null; qView.sunRel = null; qView.ringColor = RING; qView.invalidate()
             smX = Double.NaN
+            aligned = false
             when {
                 magSensor == null || rotSensor == null -> {
-                    turnTv.text = "No compass in this phone"
-                    setStatus("Use the web version's sun or wall lock instead.", RED, RED_SOFT)
+                    turnTv.text = t("No compass in this phone", "لا توجد بوصلة في هذا الهاتف")
+                    setStatus(t("Use the web version's sun or wall lock instead.", "استخدم نسخة الويب (القفل بالشمس أو بالجدار) بدلًا من ذلك."), RED, RED_SOFT)
                 }
                 !calibrated() -> {
-                    turnTv.text = "Calibrate the compass"
-                    setStatus("Wave the phone slowly in a figure‑8 a few times.", ORANGE, ORANGE_SOFT)
+                    turnTv.text = t("Calibrate the compass", "عايِر البوصلة")
+                    setStatus(t("Wave the phone slowly in a figure‑8 a few times.", "حرّك الهاتف ببطء على شكل الرقم 8 عدة مرات."), ORANGE, ORANGE_SOFT)
                 }
                 quality == Q.BAD -> {
-                    turnTv.text = "Interference here"
-                    setStatus("⚠ Something nearby is bending the magnetic field. Walk 1–2 m away from metal (cars, desks, steel doors or pillars, speakers, laptops). When the bar turns green, the spot is clean.", RED, RED_SOFT)
+                    turnTv.text = t("Interference here", "يوجد تشويش هنا")
+                    setStatus(t("⚠ Something nearby is bending the magnetic field. Walk 1–2 m away from metal (cars, desks, steel doors or pillars, speakers, laptops). When the bar turns green, the spot is clean.",
+                                "⚠ شيء قريب يُشوّه المجال المغناطيسي. ابتعد مترًا أو مترين عن المعادن (السيارات، المكاتب، الأبواب أو الأعمدة الحديدية، السماعات، الحواسيب). عندما يصبح الشريط أخضر يكون المكان نظيفًا."), RED, RED_SOFT)
                 }
                 else -> {
-                    turnTv.text = "Checking the magnetic field…"
-                    setStatus("Hold the phone flat for a moment.", ORANGE, ORANGE_SOFT)
+                    turnTv.text = t("Checking the magnetic field…", "جارٍ فحص المجال المغناطيسي…")
+                    setStatus(t("Hold the phone flat for a moment.", "أمسك الهاتف بشكل مستوٍ للحظة."), ORANGE, ORANGE_SOFT)
                 }
             }
         } else {
@@ -414,32 +501,49 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
             val holding = quality == Q.BAD || !calibrated()
             val ok = abs(diff) <= 2.0
-            qView.ringColor = when { holding -> ORANGE; ok -> GREEN; else -> Color.parseColor("#D9D4C8") }
+            qView.ringColor = when { holding -> ORANGE; ok -> GREEN; else -> RING }
             qView.invalidate()
             turnTv.setTextColor(if (ok) GREEN else INK)
-            turnTv.text = if (ok) "✓ You are facing the Qibla"
-                else "Turn ${abs(diff).toInt()}° ${if (diff > 0) "right ↻" else "left ↺"}"
-            if (ok && !aligned) qView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            val deg = abs(diff).toInt()
+            turnTv.text = when {
+                ok -> t("✓ You are facing the Qibla", "✓ أنت متجه إلى القبلة")
+                diff > 0 -> t("Turn $deg° right ↻", "استدر $deg° يمينًا ↻")
+                else -> t("Turn $deg° left ↺", "استدر $deg° يسارًا ↺")
+            }
+            guide(diff, offsetFromGood || gameSensor == null || !holding, now)
             aligned = ok
 
             val approx = !offsetFromGood && gameSensor != null
             when {
-                !calibrated() -> setStatus("Holding the last good direction. Wave the phone in a figure‑8 to recalibrate the compass.", ORANGE, ORANGE_SOFT)
+                !calibrated() -> setStatus(t("Holding the last good direction. Wave the phone in a figure‑8 to recalibrate the compass.",
+                                             "يتم الاحتفاظ بآخر اتجاه دقيق. حرّك الهاتف على شكل الرقم 8 لإعادة معايرة البوصلة."), ORANGE, ORANGE_SOFT)
                 quality == Q.BAD -> {
                     val mins = (now - lastGoodAt) / 60000
-                    setStatus("Interference here — the compass is being ignored. The gyroscope is holding the last accurate direction." +
-                        if (lastGoodAt == 0L || mins >= 2) " Step to a clean spot (green bar) to refresh." else "", ORANGE, ORANGE_SOFT)
+                    setStatus(t("Interference here — the compass is being ignored. The gyroscope is holding the last accurate direction.",
+                                "يوجد تشويش هنا — تم تجاهل البوصلة، والجيروسكوب يحتفظ بآخر اتجاه دقيق.") +
+                        if (lastGoodAt == 0L || mins >= 2) t(" Step to a clean spot (green bar) to refresh.", " انتقل إلى مكان نظيف (شريط أخضر) للتحديث.") else "",
+                        ORANGE, ORANGE_SOFT)
                 }
-                approx -> setStatus("Approximate (small disturbance). Move a little away from metal until the bar is green for full accuracy.", ORANGE, ORANGE_SOFT)
-                quality == Q.FAIR -> setStatus("✓ Accurate — using the last clean reading (small disturbance here now).", GREEN, GREEN_SOFT)
-                else -> setStatus("✓ Accurate — magnetic field here is clean", GREEN, GREEN_SOFT)
+                approx -> setStatus(t("Approximate (small disturbance). Move a little away from metal until the bar is green for full accuracy.",
+                                      "تقريبي (تشويش بسيط). ابتعد قليلًا عن المعادن حتى يصبح الشريط أخضر للحصول على دقة كاملة."), ORANGE, ORANGE_SOFT)
+                quality == Q.FAIR -> setStatus(t("✓ Accurate — using the last clean reading (small disturbance here now).",
+                                                 "✓ دقيق — باستخدام آخر قراءة نظيفة (يوجد تشويش بسيط هنا الآن)."), GREEN, GREEN_SOFT)
+                else -> setStatus(t("✓ Accurate — magnetic field here is clean", "✓ دقيق — المجال المغناطيسي هنا نظيف"), GREEN, GREEN_SOFT)
             }
         }
 
-        val dec = g?.declination ?: 0f
-        infoTv.text = "Qibla: ${"%.1f".format(q)}° from true north · ${"%,d".format(Astro.distanceKm(lat, lon).toInt())} km to the Kaaba\n" +
-            "Location: $locLabel (${"%.5f".format(lat)}, ${"%.5f".format(lon)})\n" +
-            "True-north correction (WMM): ${if (dec >= 0) "+" else ""}${"%.1f".format(dec)}°\n" +
-            "Hold the phone flat. The small sun on the ring shows where the real sun is — a quick check."
+        val dec = (g?.declination ?: 0f).toDouble()
+        val km = String.format(Locale.US, "%,d", Astro.distanceKm(lat, lon).toInt())
+        val decTxt = (if (dec >= 0) "+" else "") + f1(dec) + "°"
+        infoTv.text = t(
+            "Qibla: ${f1(q)}° from true north · $km km to the Kaaba\n" +
+            "Location: $locLabel (${f5(lat)}, ${f5(lon)})\n" +
+            "True-north correction (WMM): $decTxt\n" +
+            "Hold the phone flat. The small sun on the ring shows where the real sun is — a quick check.",
+            "القبلة: ${f1(q)}° من الشمال الحقيقي · $km كم إلى الكعبة\n" +
+            "الموقع: $locLabel (${f5(lat)}, ${f5(lon)})\n" +
+            "تصحيح الشمال الحقيقي (WMM): $decTxt\n" +
+            "أمسك الهاتف بشكل مستوٍ. الشمس الصغيرة على الحلقة تُظهر مكان الشمس الحقيقية — للتحقق السريع."
+        )
     }
 }

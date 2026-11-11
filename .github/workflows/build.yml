@@ -1,6 +1,7 @@
 name: Build APK
 on:
   push:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: write
@@ -16,10 +17,20 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
-      - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk TrueQibla.apk
+      - name: Build signed release APK
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export SIGNING_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+          fi
+          gradle assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk TrueQibla.apk
+          rm -f "$RUNNER_TEMP/release.jks"
       - uses: actions/upload-artifact@v4
         with:
           name: TrueQibla-apk
@@ -30,4 +41,4 @@ jobs:
         run: |
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest TrueQibla.apk --title "True Qibla (latest build)" \
-            --notes "Built from ${GITHUB_SHA::7}. Download TrueQibla.apk on your phone and open it to install."
+            --notes "Build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7}). Download **TrueQibla.apk** on your Android phone and open it to install."

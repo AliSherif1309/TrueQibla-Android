@@ -18,6 +18,9 @@ class QiblaView(context: Context) : View(context) {
     var sunRel: Float? = null
     var ringColor: Int = Color.parseColor("#D9D4C8")
     var arrowColor: Int = Color.parseColor("#127A52")
+    var faceColor: Int = Color.parseColor("#FBFAF7")
+    var tickColor: Int = Color.parseColor("#B8B2A5")
+    var markerColor: Int = Color.parseColor("#1D2421")
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
@@ -36,14 +39,14 @@ class QiblaView(context: Context) : View(context) {
         val cy = height / 2f
 
         // face + ring
-        fill.color = Color.parseColor("#FBFAF7")
+        fill.color = faceColor
         c.drawCircle(cx, cy, 136 * s, fill)
         stroke.color = ringColor
         stroke.strokeWidth = 7 * s
         c.drawCircle(cx, cy, 136 * s, stroke)
 
         // small ticks every 30°
-        stroke.color = Color.parseColor("#B8B2A5")
+        stroke.color = tickColor
         stroke.strokeWidth = 2 * s
         for (a in 0 until 360 step 30) {
             val r = Math.toRadians(a.toDouble())
@@ -54,7 +57,7 @@ class QiblaView(context: Context) : View(context) {
         }
 
         // "you face this way" marker at the top
-        fill.color = Color.parseColor("#1D2421")
+        fill.color = markerColor
         arrow.reset()
         arrow.moveTo(cx, 2 * s); arrow.lineTo(cx - 9 * s, 16 * s); arrow.lineTo(cx + 9 * s, 16 * s); arrow.close()
         c.drawPath(arrow, fill)
@@ -92,6 +95,7 @@ class QiblaView(context: Context) : View(context) {
 class MeterView(context: Context) : View(context) {
     var fraction: Float = 0f
     var barColor: Int = Color.GRAY
+    var trackColor: Int = Color.parseColor("#E3DED3")
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -101,7 +105,7 @@ class MeterView(context: Context) : View(context) {
 
     override fun onDraw(c: Canvas) {
         val r = height / 2f
-        p.color = Color.parseColor("#E3DED3")
+        p.color = trackColor
         c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), r, r, p)
         p.color = barColor
         val w = (width * fraction.coerceIn(0.03f, 1f))

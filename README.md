@@ -1,30 +1,25 @@
 # True Qibla — Android
 
-A Qibla compass that checks itself.
+**القبلة الدقيقة** — a Qibla compass that checks itself.
 
-- **Gyroscope** (Android's game rotation vector, no magnet) keeps the arrow smooth and steady.
-- **Compass** gives the absolute direction, converted to **true north** with Android's built-in World Magnetic Model.
-- **Interference check**: the app measures the magnetic field's **strength** and **dip angle** and compares them with what Earth's field should be at your exact GPS position.
+**⬇ Download:** [TrueQibla.apk](https://github.com/AliSherif1309/TrueQibla-Android/releases/download/latest/TrueQibla.apk). Open it on your Android phone to install (Android 8 or newer).
+
+## What makes it accurate
+- **Gyroscope** (Android's game rotation vector, no magnet): keeps the arrow smooth and steady.
+- **Compass, corrected to true north** with Android's built-in World Magnetic Model.
+- **Interference check**: the app measures the magnetic field's strength and dip angle and compares them with the field Earth should have at your exact GPS position.
   - **Green**: the field matches, so the arrow is accurate.
   - **Red**: something nearby (steel, cars, speakers, laptops) is bending the field. The compass is ignored, the gyroscope holds the last accurate direction, and the app tells you to move. A live bar shows when you reach a clean spot.
 
-No internet needed after install. No external libraries.
+## Features
+- Opens straight to the arrow. Nothing to set up.
+- **Arabic** interface (right-to-left), used automatically when the phone is set to Arabic.
+- **Dark mode**, following the phone's setting.
+- **Vibration guidance**: ticks get faster as you turn toward the Qibla, then a double buzz when you face it. It can be switched off.
+- Works offline. No ads, no tracking, no internet permission, and no external libraries.
 
-## Build the APK — choose one
+## How it's built
+Kotlin, single screen, no dependencies. Every push to `main` builds a signed APK with GitHub Actions and publishes it as the **latest** release.
 
-### A) In the cloud with GitHub (no install on your PC)
-1. Create a free GitHub account, then make a **new repository**. It can be private.
-2. Upload all files from this folder. Keep the `.github` folder.
-3. Open the **Actions** tab and wait about 5 minutes for "Build APK" to finish.
-4. Open the finished run and download **TrueQibla-apk**. Unzip it to get `app-debug.apk`.
-5. Copy it to your phone, open it, and allow "Install unknown apps" when asked.
-
-### B) With Android Studio on your PC
-1. Install Android Studio, then **File → Open** this folder.
-2. Wait for the Gradle sync to finish. It downloads what it needs.
-3. Plug in your phone with USB debugging on and press ▶ Run. Or use **Build → Build APK(s)**.
-
-## Use
-1. Open the app, allow Location, and hold the phone flat.
-2. Turn until it says **✓ You are facing the Qibla**. The phone vibrates.
-3. If it says **Interference here**, walk slowly and watch the bar until it's green.
+Release signing uses these repository secrets (never commit the keystore):
+`SIGNING_KEYSTORE_BASE64`, `SIGNING_STORE_PASSWORD`, `SIGNING_KEY_PASSWORD`, `SIGNING_KEY_ALIAS`.
