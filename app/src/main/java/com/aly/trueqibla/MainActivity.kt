@@ -66,6 +66,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var gameSensor: Sensor? = null
     private var rotSensor: Sensor? = null
     private var magSensor: Sensor? = null
+    private var linSensor: Sensor? = null     // linear acceleration: used only to notice real steps
     private var vibrator: Vibrator? = null
 
     // location
@@ -96,7 +97,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var noFixSince = 0L
 
     // indoor averaging: one "bucket" per second of usable readings, each a direction estimate
-    private class Bucket(val x: Double, val y: Double, val w: Double, val b: Double, val dip: Double, val good: Boolean)
+    private class Bucket(val x: Double, val y: Double, val w: Double, val b: Double, val dip: Double, val good: Boolean, val spot: Int)
     private val buckets = ArrayDeque<Bucket>()
     private var accX = 0.0
     private var accY = 0.0
@@ -107,6 +108,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var accAllGood = true
     private var bucketStart = 0L
     private var avgSpots = 0
+    // simple step detector: a new "spot" only counts after the user has really walked
+    private var steps = 0
+    private var lastStepAt = 0L
+    private var accelHigh = false
     // averaging progress, for the "room average" bar
     private var avgCountP = 0.0     // enough readings?
     private var avgSpotP = 0.0      // from enough different spots?
@@ -195,6 +200,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         gameSensor = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
         rotSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         magSensor = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        linSensor = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         vibrator = if (Build.VERSION.SDK_INT >= 31)
             getSystemService(VibratorManager::class.java)?.defaultVibrator
         else getSystemService(VIBRATOR_SERVICE) as? Vibrator
@@ -394,6 +400,16 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             textSize = 14f; setTextColor(INK); setLineSpacing(0f, 1.15f); setPadding(dp(4), 0, dp(4), 0)
         })
         settingsView.addView(TextView(this).apply {
+            text = t("✉ Contact: alysherif1309@gmail.com", "✉ للتواصل: alysherif1309@gmail.com")
+            textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN); setPadding(dp(4), dp(14), dp(4), dp(4))
+            isClickable = true
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:alysherif1309@gmail.com?subject=" + Uri.encode("True Qibla feedback"))))
+                } catch (_: Exception) {}
+            }
+        })
+        settingsView.addView(TextView(this).apply {
             text = t("Source code on GitHub ↗", "الشيفرة المصدرية على GitHub ↗")
             textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN); setPadding(dp(4), dp(14), dp(4), dp(8))
             isClickable = true
@@ -418,6 +434,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         gameSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         rotSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         magSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        linSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         startLocation()
         handler.post(ticker)
     }
@@ -513,6 +530,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 magHeading = headingOf(rmRot, gameSensor == null)
                 magAt = now
                 if (gameSensor == null) fuse(now)
+            }
+            Sensor.TYPE_LINEAR_ACCELERATION -> {
+                val ax = ev.values[0]; val ay = ev.values[1]; val az = ev.values[2]
+                val m = sqrt((ax * ax + ay * ay + az * az).toDouble())
+                if (!accelHigh && m > 1.6 && now - lastStepAt > 350) { steps++; lastStepAt = now; accelHigh = true }
+                else if (m < 0.8) accelHigh = false
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 magAccuracy = ev.accuracy
@@ -610,41 +633,43 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         bucketStart = now
         if (accN >= 5 && accW > 0) {
             val r = sqrt(accX * accX + accY * accY)
-            if (r > 0) buckets.addLast(Bucket(accX / r, accY / r, accW / accN, accB / accN, accDip / accN, accAllGood))
+            // which spot is this? Every ~2 real steps is a new spot. Without a motion sensor, fall back to
+            // distinct field values (less reliable: turning the phone can also change them).
+            val bAvg = accB / accN; val dAvg = accDip / accN
+            val spot = if (linSensor != null) steps / 2 else (bAvg / 1.5).toInt() * 1000 + (dAvg / 1.0).toInt()
+            if (r > 0) buckets.addLast(Bucket(accX / r, accY / r, accW / accN, bAvg, dAvg, accAllGood, spot))
             while (buckets.size > 40) buckets.removeFirst()
         }
         accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0; accAllGood = true
-        if (method == "strict" || src == Src.GOOD || buckets.size < 2) return
-        // the readings must come from different spots (the field values must differ), not one spot repeated
-        val bs = buckets.map { it.b }
-        val ds = buckets.map { it.dip }
-        val allGood = buckets.all { it.good }
-        val diverse = (bs.max() - bs.min() > 2.0) || (ds.max() - ds.min() > 1.5)
+        if (method == "strict" || src == Src.GOOD || buckets.isEmpty()) return
+        // 1) one direction estimate per spot (standing longer at one spot does not count more)
+        class SpotEst(val x: Double, val y: Double, val w: Double)
+        val perSpot = buckets.groupBy { it.spot }.values.map { g ->
+            var gx = 0.0; var gy = 0.0; var gw = 0.0
+            for (b in g) { gx += b.w * b.x; gy += b.w * b.y; gw += b.w }
+            val r = sqrt(gx * gx + gy * gy).coerceAtLeast(1e-9)
+            SpotEst(gx / r, gy / r, gw / g.size)
+        }
+        // 2) combine the spots; their errors point in different directions and largely cancel
         var sx = 0.0; var sy = 0.0; var sw = 0.0
-        for (b in buckets) { sx += b.w * b.x; sy += b.w * b.y; sw += b.w }
+        for (e in perSpot) { sx += e.w * e.x; sy += e.w * e.y; sw += e.w }
+        val n = perSpot.size
         val rbar = (sqrt(sx * sx + sy * sy) / sw).coerceIn(1e-9, 1.0)
         val spread = Math.toDegrees(sqrt(-2.0 * kotlin.math.ln(rbar)))
-        val stdErr = spread / sqrt(buckets.size.toDouble())
-        avgSpots = buckets.size
+        val stdErr = if (n >= 2) spread / sqrt(n.toDouble()) else Double.NaN
+        avgSpots = n
         avgStdErr = stdErr
-        avgCountP = min(1.0, buckets.size / 5.0)
-        avgSpotP = if (allGood) 1.0 else min(1.0, max((bs.max() - bs.min()) / 2.0, (ds.max() - ds.min()) / 1.5))
-        avgErrP = if (stdErr <= 2.0) 1.0 else 2.0 / stdErr
-        if (buckets.size < 5) return
-        // accept when readings come from varied spots, or (outdoors / clean room) when every reading was clean
-        if ((diverse || allGood) && stdErr < 2.0) {
+        avgCountP = 1.0
+        avgSpotP = min(1.0, n / 5.0)
+        avgErrP = if (stdErr.isNaN()) 0.0 else if (stdErr <= 2.0) 1.0 else 2.0 / stdErr
+        if (n >= 5 && stdErr < 2.0) {
             offset = Astro.norm180(Math.toDegrees(atan2(sy, sx)))
             src = Src.AVG
         }
     }
 
-    /** Rough count of distinct spots visited (for the progress hint): distinct field values. */
-    private fun spotsSeen(): Int {
-        if (buckets.isEmpty()) return 0
-        val keys = HashSet<Pair<Int, Int>>()
-        for (b in buckets) keys.add(Pair((b.b / 1.5).toInt(), (b.dip / 1.0).toInt()))
-        return keys.size
-    }
+    /** Number of distinct spots visited (for the progress hints). */
+    private fun spotsSeen(): Int = buckets.map { it.spot }.distinct().size
 
     private fun currentHeading(): Double? {
         val o = offset
@@ -683,7 +708,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         avgMeter.visibility = if (relevant) View.VISIBLE else View.GONE
         avgTv.visibility = avgMeter.visibility
         if (!relevant) return
-        val p = min(avgCountP, min(avgSpotP, avgErrP))
+        val n = spotsSeen()
+        val p = if (n < 5) min(1.0, n / 5.0) * 0.8 else min(1.0, 0.8 + 0.2 * avgErrP)   // spots fill 80 %, agreement the rest
         val done = src == Src.AVG
         avgMeter.fraction = if (done) 1f else p.toFloat()
         avgMeter.barColor = if (done) GREEN else ORANGE
@@ -692,13 +718,14 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val acc = if (avgStdErr.isNaN()) "" else String.format(Locale.US, "%.1f", max(1.0, 2.0 * avgStdErr))
         avgTv.setTextColor(if (done) GREEN else MUTED)
         avgTv.text = when {
-            done -> t("✓ Room average ready — about ±$acc° (keep walking to refine)", "✓ متوسط الغرفة جاهز — بدقة ±$acc° تقريبًا (واصل المشي لتحسينها)")
+            done -> t("✓ Room average ready — from $n spots, about ±$acc° (keep walking to refine)",
+                      "✓ متوسط الغرفة جاهز — من $n أماكن، بدقة ±$acc° تقريبًا (واصل المشي لتحسينها)")
             buckets.isEmpty() && quality == Q.BAD -> t("Room average: paused — too much interference right here. Move a little.",
                                                      "متوسط الغرفة: متوقف — التشويش قوي هنا. تحرّك قليلًا.")
-            avgCountP < 1.0 && avgCountP <= avgSpotP && avgCountP <= avgErrP ->
-                t("Room average $pct% — collecting readings, keep walking slowly", "متوسط الغرفة $pct٪ — جارٍ جمع القراءات، واصل المشي ببطء")
-            avgSpotP < avgErrP -> t("Room average $pct% — walk to a few different spots in the room", "متوسط الغرفة $pct٪ — انتقل إلى عدة أماكن مختلفة في الغرفة")
-            else -> t("Room average $pct% — readings still differ, keep walking a little more", "متوسط الغرفة $pct٪ — القراءات ما زالت مختلفة، واصل المشي قليلًا")
+            n < 5 -> t("Room average $pct% — walk 2–3 steps to another spot ($n of 5 spots)",
+                       "متوسط الغرفة $pct٪ — امشِ خطوتين أو ثلاثًا إلى مكان آخر ($n من 5 أماكن)")
+            else -> t("Room average $pct% — readings still differ, try 1–2 more spots",
+                      "متوسط الغرفة $pct٪ — القراءات ما زالت مختلفة، جرّب مكانًا أو مكانين آخرين")
         }
     }
 
@@ -797,7 +824,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             aligned = ok
 
             val approx = src == Src.FAIR && gameSensor != null
-            val spots = if (buckets.isNotEmpty() && buckets.all { it.good }) buckets.size else spotsSeen()
+            val spots = spotsSeen()
             when {
                 !calibrated() -> setStatus(t("Holding the last good direction. Wave the phone in a figure‑8 to recalibrate the compass.",
                                              "يتم الاحتفاظ بآخر اتجاه دقيق. حرّك الهاتف على شكل الرقم 8 لإعادة معايرة البوصلة."), ORANGE, ORANGE_SOFT)
