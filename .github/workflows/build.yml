@@ -2,6 +2,8 @@ name: Build APK
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,7 +18,16 @@ jobs:
           gradle-version: "8.7"
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk TrueQibla.apk
       - uses: actions/upload-artifact@v4
         with:
           name: TrueQibla-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: TrueQibla.apk
+      - name: Publish as the "latest" release (direct download on the phone)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest TrueQibla.apk --title "True Qibla (latest build)" \
+            --notes "Built from ${GITHUB_SHA::7}. Download TrueQibla.apk on your phone and open it to install."
