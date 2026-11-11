@@ -107,6 +107,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var accAllGood = true
     private var bucketStart = 0L
     private var avgSpots = 0
+    // averaging progress, for the "room average" bar
+    private var avgCountP = 0.0     // enough readings?
+    private var avgSpotP = 0.0      // from enough different spots?
+    private var avgErrP = 0.0       // do they agree well enough?
+    private var avgStdErr = Double.NaN
     private var goodSince = 0L
     private var fairSince = 0L
     private var lastGoodAt = 0L
@@ -127,6 +132,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var meter: MeterView
     private lateinit var meterTv: TextView
     private lateinit var infoTv: TextView
+    private lateinit var avgTv: TextView
+    private lateinit var avgMeter: MeterView
     private lateinit var mainView: LinearLayout
     private lateinit var settingsView: LinearLayout
     private lateinit var scroll: ScrollView
@@ -235,6 +242,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
         root.addView(statusTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) })
+
+        avgTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED) }
+        root.addView(avgTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
+        avgMeter = MeterView(this).apply { trackColor = RING }
+        root.addView(avgMeter, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(4) })
 
         meterTv = TextView(this).apply { textSize = 13f; setTextColor(MUTED) }
         root.addView(meterTv, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
@@ -394,6 +406,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     /** Forget the current direction (e.g. after changing the method) and find it again. */
     private fun resetFix() {
         offset = null; src = Src.NONE; buckets.clear(); goodSince = 0L; fairSince = 0L; noFixSince = 0L; smX = Double.NaN
+        avgCountP = 0.0; avgSpotP = 0.0; avgErrP = 0.0; avgStdErr = Double.NaN; avgSpots = 0
     }
 
     private fun pulse(ms: Long) {
@@ -601,10 +614,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             while (buckets.size > 40) buckets.removeFirst()
         }
         accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0; accAllGood = true
-        if (method == "strict" || src == Src.GOOD || buckets.size < 5) return
+        if (method == "strict" || src == Src.GOOD || buckets.size < 2) return
         // the readings must come from different spots (the field values must differ), not one spot repeated
         val bs = buckets.map { it.b }
         val ds = buckets.map { it.dip }
+        val allGood = buckets.all { it.good }
         val diverse = (bs.max() - bs.min() > 2.0) || (ds.max() - ds.min() > 1.5)
         var sx = 0.0; var sy = 0.0; var sw = 0.0
         for (b in buckets) { sx += b.w * b.x; sy += b.w * b.y; sw += b.w }
@@ -612,8 +626,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val spread = Math.toDegrees(sqrt(-2.0 * kotlin.math.ln(rbar)))
         val stdErr = spread / sqrt(buckets.size.toDouble())
         avgSpots = buckets.size
+        avgStdErr = stdErr
+        avgCountP = min(1.0, buckets.size / 5.0)
+        avgSpotP = if (allGood) 1.0 else min(1.0, max((bs.max() - bs.min()) / 2.0, (ds.max() - ds.min()) / 1.5))
+        avgErrP = if (stdErr <= 2.0) 1.0 else 2.0 / stdErr
+        if (buckets.size < 5) return
         // accept when readings come from varied spots, or (outdoors / clean room) when every reading was clean
-        if ((diverse || buckets.all { it.good }) && stdErr < 2.0) {
+        if ((diverse || allGood) && stdErr < 2.0) {
             offset = Astro.norm180(Math.toDegrees(atan2(sy, sx)))
             src = Src.AVG
         }
@@ -657,6 +676,32 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
     }
 
+    /** "Room average" progress bar: how close the averaged direction is to being trusted, and what it still needs. */
+    private fun renderAverageBar() {
+        val relevant = method != "strict" && magSensor != null && gameSensor != null &&
+            (src != Src.GOOD || method == "average")
+        avgMeter.visibility = if (relevant) View.VISIBLE else View.GONE
+        avgTv.visibility = avgMeter.visibility
+        if (!relevant) return
+        val p = min(avgCountP, min(avgSpotP, avgErrP))
+        val done = src == Src.AVG
+        avgMeter.fraction = if (done) 1f else p.toFloat()
+        avgMeter.barColor = if (done) GREEN else ORANGE
+        avgMeter.invalidate()
+        val pct = ((if (done) 1.0 else p) * 100).toInt()
+        val acc = if (avgStdErr.isNaN()) "" else String.format(Locale.US, "%.1f", max(1.0, 2.0 * avgStdErr))
+        avgTv.setTextColor(if (done) GREEN else MUTED)
+        avgTv.text = when {
+            done -> t("✓ Room average ready — about ±$acc° (keep walking to refine)", "✓ متوسط الغرفة جاهز — بدقة ±$acc° تقريبًا (واصل المشي لتحسينها)")
+            buckets.isEmpty() && quality == Q.BAD -> t("Room average: paused — too much interference right here. Move a little.",
+                                                     "متوسط الغرفة: متوقف — التشويش قوي هنا. تحرّك قليلًا.")
+            avgCountP < 1.0 && avgCountP <= avgSpotP && avgCountP <= avgErrP ->
+                t("Room average $pct% — collecting readings, keep walking slowly", "متوسط الغرفة $pct٪ — جارٍ جمع القراءات، واصل المشي ببطء")
+            avgSpotP < avgErrP -> t("Room average $pct% — walk to a few different spots in the room", "متوسط الغرفة $pct٪ — انتقل إلى عدة أماكن مختلفة في الغرفة")
+            else -> t("Room average $pct% — readings still differ, keep walking a little more", "متوسط الغرفة $pct٪ — القراءات ما زالت مختلفة، واصل المشي قليلًا")
+        }
+    }
+
     private fun render() {
         val now = System.currentTimeMillis()
         if (lat.isNaN()) {
@@ -690,6 +735,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         meter.visibility = if (showMeter) View.VISIBLE else View.GONE
         meterTv.visibility = meter.visibility
         infoTv.visibility = if (detailed) View.VISIBLE else View.GONE
+        renderAverageBar()
 
         val raw = currentHeading()
         if (raw != null) noFixSince = 0L else if (noFixSince == 0L) noFixSince = now
