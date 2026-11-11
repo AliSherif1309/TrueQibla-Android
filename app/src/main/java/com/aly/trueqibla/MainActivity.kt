@@ -88,7 +88,22 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     // fusion
     private var offset: Double? = null      // true heading − gyro heading
-    private var offsetFromGood = false
+    private enum class Src { NONE, FAIR, AVG, GOOD }   // where the current direction came from
+    private var src = Src.NONE
+    private val offsetFromGood get() = src == Src.GOOD
+    private var noFixSince = 0L
+
+    // indoor averaging: one "bucket" per second of usable readings, each a direction estimate
+    private class Bucket(val x: Double, val y: Double, val w: Double, val b: Double, val dip: Double)
+    private val buckets = ArrayDeque<Bucket>()
+    private var accX = 0.0
+    private var accY = 0.0
+    private var accW = 0.0
+    private var accB = 0.0
+    private var accDip = 0.0
+    private var accN = 0
+    private var bucketStart = 0L
+    private var avgSpots = 0
     private var goodSince = 0L
     private var fairSince = 0L
     private var lastGoodAt = 0L
@@ -118,7 +133,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     // ---------------------------------------------------------------- language + theme
 
-    private val ar: Boolean by lazy { resources.configuration.locales[0].language == "ar" }
+    /** Language chosen inside the app (first start: follows the phone). */
+    private val ar: Boolean by lazy {
+        val saved = getSharedPreferences("qibla", MODE_PRIVATE).getString("lang", null)
+        if (saved != null) saved == "ar" else resources.configuration.locales[0].language == "ar"
+    }
     private fun t(en: String, arabic: String) = if (ar) arabic else en
     private fun f1(x: Double) = String.format(Locale.US, "%.1f", x)
     private fun f5(x: Double) = String.format(Locale.US, "%.5f", x)
@@ -171,7 +190,17 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         header.addView(TextView(this).apply {
             text = t("True Qibla", "القبلة الدقيقة"); textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(INK)
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        if (!ar) header.addView(TextView(this).apply { text = "القبلة"; textSize = 24f; setTextColor(GREEN); setTypeface(typeface, Typeface.BOLD) })
+        header.addView(TextView(this).apply {
+            text = if (ar) "English" else "العربية"
+            textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(GREEN)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(dp(1), GREEN); cornerRadius = dp(18).toFloat() }
+            isClickable = true
+            setOnClickListener {
+                getSharedPreferences("qibla", MODE_PRIVATE).edit().putString("lang", if (ar) "en" else "ar").apply()
+                recreate()
+            }
+        })
         root.addView(header)
 
         qView = QiblaView(this).apply {
@@ -385,24 +414,73 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             if (goodSince == 0L) goodSince = now
             fairSince = 0L
             val o = offset
-            if (o == null || !offsetFromGood) {
-                if (now - goodSince > 800) { offset = d; offsetFromGood = true }
+            if (o == null || src != Src.GOOD) {
+                if (now - goodSince > 800) { offset = d; src = Src.GOOD }
             } else {
                 offset = Astro.norm180(o + follow * Astro.norm180(d - o))
             }
             lastGoodAt = now
         } else {
             goodSince = 0L
-            // No clean reading yet at all: accept a "fair" one after 3 s so the user still gets an arrow,
-            // clearly labelled as approximate. A clean reading later replaces it.
-            if (quality == Q.FAIR && calibrated() && !offsetFromGood) {
+            // Quick first arrow: accept a "fair" reading after 2 s, clearly labelled approximate.
+            if (quality == Q.FAIR && calibrated() && src == Src.NONE) {
                 if (fairSince == 0L) fairSince = now
-                val o = offset
-                if (o == null) { if (now - fairSince > 3000) offset = d }
-                else offset = Astro.norm180(o + follow * Astro.norm180(d - o))
-            } else fairSince = 0L
+                if (now - fairSince > 2000) { offset = d; src = Src.FAIR }
+            } else if (quality == Q.FAIR && calibrated() && src == Src.FAIR) {
+                val o = offset!!
+                offset = Astro.norm180(o + follow * Astro.norm180(d - o))
+            } else if (quality != Q.FAIR) fairSince = 0L
             // BAD: ignore the compass completely; the gyroscope keeps the last good direction.
         }
+        collectForAverage(d, now)
+    }
+
+    /**
+     * Indoors the field is slightly bent almost everywhere, but differently at each spot.
+     * Because the gyroscope ties every reading to the same reference frame, estimates taken at
+     * different spots can be averaged: their errors point in different directions and largely cancel.
+     * Readings are weighted by how well the field matches Earth's field there.
+     */
+    private fun collectForAverage(d: Double, now: Long) {
+        val fe = fieldError()
+        if (fe != null && (quality == Q.GOOD || quality == Q.FAIR) && calibrated()) {
+            val (se, de) = fe
+            val w = 1.0 / ((se / 0.07) * (se / 0.07) + (de / 4.0) * (de / 4.0) + 0.2)
+            accX += w * cos(Math.toRadians(d)); accY += w * sin(Math.toRadians(d)); accW += w
+            accB += bStrength; accDip += bDip; accN++
+        }
+        if (bucketStart == 0L) bucketStart = now
+        if (now - bucketStart < 1000) return
+        bucketStart = now
+        if (accN >= 5 && accW > 0) {
+            val r = sqrt(accX * accX + accY * accY)
+            if (r > 0) buckets.addLast(Bucket(accX / r, accY / r, accW / accN, accB / accN, accDip / accN))
+            while (buckets.size > 40) buckets.removeFirst()
+        }
+        accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0
+        if (src == Src.GOOD || buckets.size < 5) return
+        // the readings must come from different spots (the field values must differ), not one spot repeated
+        val bs = buckets.map { it.b }
+        val ds = buckets.map { it.dip }
+        val diverse = (bs.max() - bs.min() > 2.0) || (ds.max() - ds.min() > 1.5)
+        var sx = 0.0; var sy = 0.0; var sw = 0.0
+        for (b in buckets) { sx += b.w * b.x; sy += b.w * b.y; sw += b.w }
+        val rbar = (sqrt(sx * sx + sy * sy) / sw).coerceIn(1e-9, 1.0)
+        val spread = Math.toDegrees(sqrt(-2.0 * kotlin.math.ln(rbar)))
+        val stdErr = spread / sqrt(buckets.size.toDouble())
+        avgSpots = buckets.size
+        if (diverse && stdErr < 2.0) {
+            offset = Astro.norm180(Math.toDegrees(atan2(sy, sx)))
+            src = Src.AVG
+        }
+    }
+
+    /** Rough count of distinct spots visited (for the progress hint): distinct field values. */
+    private fun spotsSeen(): Int {
+        if (buckets.isEmpty()) return 0
+        val keys = HashSet<Pair<Int, Int>>()
+        for (b in buckets) keys.add(Pair((b.b / 1.5).toInt(), (b.dip / 1.0).toInt()))
+        return keys.size
     }
 
     private fun currentHeading(): Double? {
@@ -466,6 +544,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         meter.invalidate()
 
         val raw = currentHeading()
+        if (raw != null) noFixSince = 0L else if (noFixSince == 0L) noFixSince = now
         if (raw == null) {
             qView.qiblaRel = null; qView.sunRel = null; qView.ringColor = RING; qView.invalidate()
             smX = Double.NaN
@@ -478,6 +557,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 !calibrated() -> {
                     turnTv.text = t("Calibrate the compass", "عايِر البوصلة")
                     setStatus(t("Wave the phone slowly in a figure‑8 a few times.", "حرّك الهاتف ببطء على شكل الرقم 8 عدة مرات."), ORANGE, ORANGE_SOFT)
+                }
+                quality == Q.BAD && now - noFixSince > 8000 -> {
+                    turnTv.text = t("Interference here", "يوجد تشويش هنا")
+                    setStatus(t("⚠ Strong interference in this area. Try: the middle of the room, near a window, away from desks and appliances, phone at chest height. Or start outside / by a window and walk in — the arrow keeps its direction.",
+                                "⚠ تشويش قوي في هذا المكان. جرّب: وسط الغرفة، أو قرب نافذة، بعيدًا عن المكاتب والأجهزة، والهاتف بمستوى الصدر. أو ابدأ في الخارج أو قرب نافذة ثم ادخل — السهم يحتفظ باتجاهه."), RED, RED_SOFT)
                 }
                 quality == Q.BAD -> {
                     turnTv.text = t("Interference here", "يوجد تشويش هنا")
@@ -513,7 +597,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             guide(diff, offsetFromGood || gameSensor == null || !holding, now)
             aligned = ok
 
-            val approx = !offsetFromGood && gameSensor != null
+            val approx = src == Src.FAIR && gameSensor != null
+            val spots = spotsSeen()
             when {
                 !calibrated() -> setStatus(t("Holding the last good direction. Wave the phone in a figure‑8 to recalibrate the compass.",
                                              "يتم الاحتفاظ بآخر اتجاه دقيق. حرّك الهاتف على شكل الرقم 8 لإعادة معايرة البوصلة."), ORANGE, ORANGE_SOFT)
@@ -524,8 +609,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                         if (lastGoodAt == 0L || mins >= 2) t(" Step to a clean spot (green bar) to refresh.", " انتقل إلى مكان نظيف (شريط أخضر) للتحديث.") else "",
                         ORANGE, ORANGE_SOFT)
                 }
-                approx -> setStatus(t("Approximate (small disturbance). Move a little away from metal until the bar is green for full accuracy.",
-                                      "تقريبي (تشويش بسيط). ابتعد قليلًا عن المعادن حتى يصبح الشريط أخضر للحصول على دقة كاملة."), ORANGE, ORANGE_SOFT)
+                approx -> setStatus(t("Approximate. Walk slowly around the room with the phone flat — readings from different spots are averaged for accuracy (${min(spots, 5)} of 5 spots).",
+                                      "تقريبي. امشِ ببطء في الغرفة والهاتف مستوٍ — يتم دمج القراءات من أماكن مختلفة لزيادة الدقة (${min(spots, 5)} من 5 أماكن)."), ORANGE, ORANGE_SOFT)
+                src == Src.AVG -> setStatus(t("✓ Accurate — averaged from $avgSpots readings around this room",
+                                              "✓ دقيق — متوسط $avgSpots قراءة من أماكن مختلفة في هذه الغرفة"), GREEN, GREEN_SOFT)
                 quality == Q.FAIR -> setStatus(t("✓ Accurate — using the last clean reading (small disturbance here now).",
                                                  "✓ دقيق — باستخدام آخر قراءة نظيفة (يوجد تشويش بسيط هنا الآن)."), GREEN, GREEN_SOFT)
                 else -> setStatus(t("✓ Accurate — magnetic field here is clean", "✓ دقيق — المجال المغناطيسي هنا نظيف"), GREEN, GREEN_SOFT)

@@ -11,9 +11,12 @@
   - **Green**: the field matches, so the arrow is accurate.
   - **Red**: something nearby (steel, cars, speakers, laptops) is bending the field. The compass is ignored, the gyroscope holds the last accurate direction, and the app tells you to move. A live bar shows when you reach a clean spot.
 
+## Indoors
+Inside buildings, steel bends the magnetic field a little almost everywhere. The app averages readings taken at different spots as you walk slowly around the room. The errors at each spot point in different directions and largely cancel, so a usable, accurate direction comes quickly even when no single spot is perfectly clean.
+
 ## Features
 - Opens straight to the arrow. Nothing to set up.
-- **Arabic** interface (right-to-left), used automatically when the phone is set to Arabic.
+- **Arabic / English** switch inside the app (right-to-left layout for Arabic). It's remembered, whatever the phone's language.
 - **Dark mode**, following the phone's setting.
 - **Vibration guidance**: ticks get faster as you turn toward the Qibla, then a double buzz when you face it. It can be switched off.
 - Works offline. No ads, no tracking, no internet permission, and no external libraries.
