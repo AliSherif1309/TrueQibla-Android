@@ -28,7 +28,7 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             export SIGNING_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
           fi
-          gradle assembleRelease --no-daemon
+          gradle testDebugUnitTest lintDebug assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release.apk TrueQibla.apk
           rm -f "$RUNNER_TEMP/release.jks"
       - uses: actions/upload-artifact@v4

@@ -19,6 +19,7 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
@@ -55,8 +56,8 @@ import kotlin.math.sqrt
  *     (GeomagneticField) converts it to TRUE north.
  *  3. Raw MAGNETIC_FIELD is compared with the field Earth SHOULD have at this exact place
  *     (strength and dip angle, also from GeomagneticField). If they don't match, something nearby
- *     is bending the field: the compass is ignored and the gyroscope holds the last good direction,
- *     and the user is told to move.
+ *     may be bending the field: the compass is ignored and the gyroscope holds a recent reference
+ *     for at most 30 seconds. Passing the check does not prove azimuth accuracy.
  *
  * Arabic (with right-to-left layout) is used automatically when the phone language is Arabic,
  * and the dark theme follows the phone's dark mode.
@@ -70,6 +71,16 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var gameSensor: Sensor? = null
     private var rotSensor: Sensor? = null
     private var magSensor: Sensor? = null
+    private var accelSensor: Sensor? = null
+    private val gravity = FloatArray(3)
+    private var accelAt = 0L
+    private var fieldAt = 0L
+    private var gameAt = 0L
+    private var anchorAt = 0L
+    private var locAt = 0L
+    private var permissionAsked = false
+    private var rotAccuracy = SensorManager.SENSOR_STATUS_UNRELIABLE
+    private var lastDisplayRotation = -1
     private var linSensor: Sensor? = null     // linear acceleration: used only to notice real steps
     private var vibrator: Vibrator? = null
 
@@ -85,19 +96,19 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private val rmRot = FloatArray(9)
     private val up = FloatArray(3)          // world "up" expressed in phone coordinates
     private var haveUp = false
-    private var upright = false
     private var gameHeading: Double? = null
     private var magHeading: Double? = null  // magnetic north based (declination not yet added)
     private var magAt = 0L
-    private var magAccuracy = SensorManager.SENSOR_STATUS_ACCURACY_HIGH
+    private var magAccuracy = SensorManager.SENSOR_STATUS_UNRELIABLE
     private var bStrength = Double.NaN      // µT, smoothed
     private var bDip = Double.NaN           // degrees (+ = downward), smoothed
+    private var latestStrength = Double.NaN
+    private var latestDip = Double.NaN
 
     // fusion
     private var offset: Double? = null      // true heading − gyro heading
     private enum class Src { NONE, FAIR, AVG, GOOD }   // where the current direction came from
     private var src = Src.NONE
-    private val offsetFromGood get() = src == Src.GOOD
     private var noFixSince = 0L
 
     // indoor averaging: one "bucket" per second of usable readings, each a direction estimate
@@ -210,6 +221,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         lm = getSystemService(LOCATION_SERVICE) as LocationManager
         gameSensor = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
         rotSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            ?: sm.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+        if (rotSensor == null) accelSensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         magSensor = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         linSensor = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         vibrator = if (Build.VERSION.SDK_INT >= 31)
@@ -344,7 +357,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         if (savedInstanceState?.getBoolean("settingsOpen", false) == true) showSettings(true)
 
         // show the last saved position immediately (works offline); GPS refines it
-        if (prefs.contains("lat")) setLocation(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), 0.0, -1f,
+        if (prefs.contains("lat")) setLocation(if (prefs.contains("latBits")) Double.fromBits(prefs.getLong("latBits", 0L)) else prefs.getFloat("lat", 0f).toDouble(),
+            if (prefs.contains("lonBits")) Double.fromBits(prefs.getLong("lonBits", 0L)) else prefs.getFloat("lon", 0f).toDouble(), 0.0, -1f,
             t("last known position", "آخر موقع معروف"))
     }
 
@@ -432,11 +446,11 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 t("Uses a clean reading when there is one; indoors it averages readings around the room. Shows a quick approximate arrow while it works.",
                   "يستخدم القراءة النظيفة إن وُجدت، وفي الداخل يدمج القراءات من أنحاء الغرفة. يعرض سهمًا تقريبيًا سريعًا أثناء العمل.")),
             Triple("strict", t("Strict", "صارم"),
-                t("Shows the arrow only after finding a clean spot. Slower indoors, but never approximate.",
-                  "لا يعرض السهم إلا بعد إيجاد مكان نظيف. أبطأ في الداخل، لكنه ليس تقريبيًا أبدًا.")),
+                t("Requires passing field checks. Every phone compass still has uncertainty.",
+                  "يتطلب اجتياز فحوص المجال. تبقى بوصلة الهاتف عرضة للخطأ.")),
             Triple("average", t("Room average", "متوسط الغرفة"),
-                t("Always combines several readings, even when one spot looks clean. Most robust inside buildings.",
-                  "يدمج دائمًا عدة قراءات حتى لو بدا المكان نظيفًا. الأكثر ثباتًا داخل المباني."))
+                t("Combines several readings. Shared magnetic bias can remain; results are approximate.",
+                  "يدمج عدة قراءات. قد يبقى انحياز مغناطيسي مشترك؛ النتيجة تقريبية."))
         ), method) { k ->
             method = k; prefs.edit().putString("method", k).apply(); resetFix(); buildSettings()
         }
@@ -471,8 +485,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val events = Astro.nextSunOverKaaba(System.currentTimeMillis())
         settingsView.addView(sectionTitle(t("SUN OVER THE KAABA", "الشمس فوق الكعبة")))
         settingsView.addView(TextView(this).apply {
-            text = t("Twice a year the sun is directly over the Kaaba. At that minute every vertical shadow, wherever the sun is up, points exactly away from the Qibla — a natural check that needs no phone.\n\nNext:\n",
-                     "مرتين في السنة تكون الشمس فوق الكعبة مباشرة. في تلك الدقيقة يشير ظل أي شيء عمودي، حيثما كانت الشمس ظاهرة، بعكس اتجاه القبلة تمامًا — طريقة طبيعية للتحقق لا تحتاج إلى هاتف.\n\nالموعد القادم:\n") +
+            text = t("Twice a year the sun is directly over the Kaaba. At that minute every vertical shadow, wherever the sun is up, points approximately away from the Qibla — a natural check that needs no phone.\n\nNext:\n",
+                     "مرتين في السنة تكون الشمس فوق الكعبة مباشرة. في تلك الدقيقة يشير ظل أي شيء عمودي، حيثما كانت الشمس ظاهرة، بعكس اتجاه القبلة تقريبًا — طريقة طبيعية للتحقق لا تحتاج إلى هاتف.\n\nالموعد القادم:\n") +
                 events.joinToString("\n") { "• " + fmtEvent(it) }
             textSize = 14f; setTextColor(INK); setLineSpacing(0f, 1.15f); setPadding(dp(4), 0, dp(4), dp(8))
         })
@@ -499,10 +513,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         settingsView.addView(TextView(this).apply {
             text = t("True Qibla $ver\n\nPoints to the Kaaba using the great-circle direction from your GPS position, corrected to true north. " +
                        "The gyroscope keeps the arrow steady, and the magnetic field is checked against Earth's expected field at your location, " +
-                       "so the app knows when nearby metal makes the compass unreliable.\n\nFree and open source (MIT License). No ads, no tracking.",
+                       "but these checks cannot detect every magnetic disturbance.\n\nFree and open source (MIT License). No ads, no tracking.",
                      "القبلة الدقيقة $ver\n\nيشير إلى الكعبة باتجاه الدائرة العظمى من موقعك عبر GPS، مع التصحيح إلى الشمال الحقيقي. " +
                        "يحافظ الجيروسكوب على ثبات السهم، ويُقارَن المجال المغناطيسي بمجال الأرض المتوقع في موقعك، " +
-                       "فيعرف التطبيق متى تجعل المعادن القريبة البوصلة غير موثوقة.\n\nمجاني ومفتوح المصدر (رخصة MIT). بلا إعلانات ولا تتبّع.")
+                       "لكن هذه الفحوص لا تكشف كل تشويش مغناطيسي.\n\nمجاني ومفتوح المصدر (رخصة MIT). بلا إعلانات ولا تتبّع.")
             textSize = 14f; setTextColor(INK); setLineSpacing(0f, 1.15f); setPadding(dp(4), 0, dp(4), 0)
         })
         settingsView.addView(TextView(this).apply {
@@ -528,6 +542,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     /** Forget the current direction (e.g. after changing the method) and find it again. */
     private fun resetFix() {
         offset = null; src = Src.NONE; buckets.clear(); goodSince = 0L; fairSince = 0L; noFixSince = 0L; smX = Double.NaN
+        anchorAt = 0L; lastGoodAt = 0L; lastFuse = 0L
+        accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0
+        accAllGood = true; bucketStart = 0L; steps = 0; accelHigh = false
         avgCountP = 0.0; avgSpotP = 0.0; avgErrP = 0.0; avgStdErr = Double.NaN; avgSpots = 0
     }
 
@@ -535,12 +552,24 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         try { vibrator?.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)) } catch (_: Exception) {}
     }
 
+    private fun register(type: Int): Sensor? = sm.getDefaultSensor(type)?.takeIf {
+        sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+    }
+
     override fun onResume() {
         super.onResume()
-        gameSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        rotSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        magSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        linSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        resetFix()
+        gameHeading = null; magHeading = null; haveUp = false
+        gameAt = 0L; magAt = 0L; fieldAt = 0L; accelAt = 0L
+        bStrength = Double.NaN; bDip = Double.NaN; quality = Q.UNKNOWN
+        latestStrength = Double.NaN; latestDip = Double.NaN
+        magAccuracy = SensorManager.SENSOR_STATUS_UNRELIABLE
+        rotAccuracy = SensorManager.SENSOR_STATUS_UNRELIABLE
+        gameSensor = register(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        rotSensor = register(Sensor.TYPE_ROTATION_VECTOR) ?: register(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+        accelSensor = if (rotSensor == null) register(Sensor.TYPE_ACCELEROMETER) else null
+        magSensor = register(Sensor.TYPE_MAGNETIC_FIELD)
+        linSensor = register(Sensor.TYPE_LINEAR_ACCELERATION)
         startLocation()
         Reminders.scheduleNext(this)
         handler.post(ticker)
@@ -550,7 +579,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         super.onPause()
         sm.unregisterListener(this)
         try { lm.removeUpdates(this) } catch (_: Exception) {}
-        handler.removeCallbacks(ticker)
+        handler.removeCallbacksAndMessages(null)
+        vibrator?.cancel()
     }
 
     // ---------------------------------------------------------------- location
@@ -559,20 +589,25 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (!fine && !coarse) {
-            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 1)
+            locAt = 0L
+            if (!permissionAsked) {
+                permissionAsked = true
+                requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 1)
+            }
             return
         }
-        try {
-            for (prov in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
-                val last = lm.getLastKnownLocation(prov)
-                if (last != null && System.currentTimeMillis() - last.time < 10 * 60_000L) onLocationChanged(last)
+        try { lm.removeUpdates(this) } catch (_: SecurityException) {}
+        for (prov in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            if (prov == LocationManager.GPS_PROVIDER && !fine) continue
+            try {
+                lm.getLastKnownLocation(prov)?.let { onLocationChanged(it) }
+                // Subscribe even while disabled, so enabling Location later recovers without a restart.
+                lm.requestLocationUpdates(prov, 2000L, 0f, this)
+            } catch (_: SecurityException) {
+                // Permission may be revoked between the check and this call.
+            } catch (_: IllegalArgumentException) {
+                // A missing provider must not prevent trying the other provider.
             }
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER))
-                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000L, 0f, this)
-            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
-                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 2000L, 0f, this)
-        } catch (_: SecurityException) {
-        } catch (_: IllegalArgumentException) {
         }
     }
 
@@ -586,18 +621,20 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             }
             return
         }
-        startLocation()
+        if (requestCode == 1 && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) startLocation()
     }
 
     override fun onLocationChanged(l: Location) {
-        // keep the more accurate fix
-        if (!lat.isNaN() && locAcc > 0 && l.accuracy > locAcc * 1.5f && l.accuracy > 30f) return
-        val src = if (l.provider == LocationManager.GPS_PROVIDER) "GPS" else t("Network", "الشبكة")
-        val label = "$src ±${l.accuracy.toInt()} ${t("m", "م")}"
-        setLocation(l.latitude, l.longitude, if (l.hasAltitude()) l.altitude else 0.0, l.accuracy, label)
-        if (l.provider == LocationManager.GPS_PROVIDER && l.accuracy <= 20f) {
-            try { lm.removeUpdates(this) } catch (_: Exception) {}   // good enough: save battery
-        }
+        val now = SystemClock.elapsedRealtime()
+        val at = l.elapsedRealtimeNanos / 1_000_000L
+        if (!Reliability.coordinates(l.latitude, l.longitude) || !l.hasAccuracy() ||
+            !Reliability.acceptLocation(now - at, l.accuracy, if (locAt == 0L) Long.MAX_VALUE else now - locAt, locAcc)) return
+        val source = if (l.provider == LocationManager.GPS_PROVIDER) "GPS" else t("Network", "الشبكة")
+        if (lat.isFinite() && (abs(lat - l.latitude) > 0.01 || abs(lon - l.longitude) > 0.01)) resetFix()
+        locAt = at
+        setLocation(l.latitude, l.longitude, if (l.hasAltitude()) l.altitude else 0.0,
+            l.accuracy, "$source ±${l.accuracy.toInt()} ${t("m", "م")}")
+        // Keep foreground updates running: the user may travel after the first accurate fix.
     }
 
     // Needed on Android 8–10, where these are not default methods
@@ -607,9 +644,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     override fun onProviderDisabled(provider: String) {}
 
     private fun setLocation(la: Double, lo: Double, altM: Double, acc: Float, label: String) {
+        if (!Reliability.coordinates(la, lo)) return
         lat = la; lon = lo; locAcc = acc; locLabel = label
-        geo = GeomagneticField(la.toFloat(), lo.toFloat(), altM.toFloat(), System.currentTimeMillis())
+        val altitude = if (altM.isFinite()) altM.coerceIn(-12_000.0, 100_000.0) else 0.0
+        geo = GeomagneticField(la.toFloat(), lo.toFloat(), altitude.toFloat(), System.currentTimeMillis())
         getSharedPreferences("qibla", MODE_PRIVATE).edit()
+            .putLong("latBits", la.toBits()).putLong("lonBits", lo.toBits())
             .putFloat("lat", la.toFloat()).putFloat("lon", lo.toFloat()).apply()
     }
 
@@ -617,34 +657,57 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {
         if (sensor.type == Sensor.TYPE_MAGNETIC_FIELD) magAccuracy = accuracy
+        if (sensor.type == rotSensor?.type) rotAccuracy = accuracy
     }
 
-    /** Heading (deg, clockwise from the frame's north) of the phone's top edge — or, when the phone is
-     *  held upright, of the direction the back camera faces. r maps phone -> world (East, North, Up). */
-    private fun headingOf(r: FloatArray, updateUpright: Boolean): Double {
-        val zUp = abs(r[8])
-        if (updateUpright) upright = if (upright) zUp < 0.57f else zUp < 0.42f
-        val e: Double
-        val n: Double
-        if (upright) { e = -r[2].toDouble(); n = -r[5].toDouble() } else { e = r[1].toDouble(); n = r[4].toDouble() }
-        return Astro.norm360(Math.toDegrees(atan2(e, n)))
+    @Suppress("DEPRECATION")
+    private fun headingOf(r: FloatArray): Double? =
+        Reliability.heading(r, windowManager.defaultDisplay.rotation)
+
+    private fun fallbackHeading(now: Long, magnetic: FloatArray) {
+        if (!Reliability.fresh(now, accelAt, 500L)) { magHeading = null; return }
+        if (!SensorManager.getRotationMatrix(rmRot, null, gravity, magnetic)) {
+            magHeading = null
+            return
+        }
+        if (gameSensor == null) {
+            up[0] = rmRot[6]; up[1] = rmRot[7]; up[2] = rmRot[8]; haveUp = true
+        }
+        magHeading = headingOf(rmRot); magAt = now
+        rotAccuracy = magAccuracy
     }
 
     override fun onSensorChanged(ev: SensorEvent) {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
+        if (!Reliability.fresh(now, ev.timestamp / 1_000_000L, 500L)) return
+        if (ev.values.any { !it.isFinite() }) return
+        @Suppress("DEPRECATION")
+        val rotation = windowManager.defaultDisplay.rotation
+        if (lastDisplayRotation != rotation) { resetFix(); lastDisplayRotation = rotation }
         when (ev.sensor.type) {
             Sensor.TYPE_GAME_ROTATION_VECTOR -> {
                 SensorManager.getRotationMatrixFromVector(rmGame, ev.values)
                 up[0] = rmGame[6]; up[1] = rmGame[7]; up[2] = rmGame[8]; haveUp = true
-                gameHeading = headingOf(rmGame, true)
+                if (gameAt != 0L && now - gameAt > Reliability.SENSOR_MAX_AGE_MS) resetFix()
+                gameHeading = headingOf(rmGame); gameAt = now
                 fuse(now)
             }
-            Sensor.TYPE_ROTATION_VECTOR -> {
+            Sensor.TYPE_ROTATION_VECTOR, Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR -> {
+                rotAccuracy = ev.accuracy
+                // Optional estimated azimuth error is in radians; -1 means unavailable.
+                if (ev.values.size >= 5 && ev.values[4] > Math.toRadians(15.0))
+                    rotAccuracy = SensorManager.SENSOR_STATUS_UNRELIABLE
                 SensorManager.getRotationMatrixFromVector(rmRot, ev.values)
                 if (gameSensor == null) { up[0] = rmRot[6]; up[1] = rmRot[7]; up[2] = rmRot[8]; haveUp = true }
-                magHeading = headingOf(rmRot, gameSensor == null)
+                magHeading = headingOf(rmRot)
                 magAt = now
                 if (gameSensor == null) fuse(now)
+            }
+            Sensor.TYPE_ACCELEROMETER -> {
+                val norm = sqrt(ev.values.take(3).sumOf { (it * it).toDouble() })
+                if (norm !in 7.0..12.0) { accelAt = 0L; return }
+                for (i in 0..2) gravity[i] = if (accelAt == 0L) ev.values[i] else gravity[i] + 0.2f * (ev.values[i] - gravity[i])
+                accelAt = now
             }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 val ax = ev.values[0]; val ay = ev.values[1]; val az = ev.values[2]
@@ -654,15 +717,19 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 magAccuracy = ev.accuracy
+                if (rotSensor == null) fallbackHeading(now, ev.values)
                 if (!haveUp) return
                 val bx = ev.values[0].toDouble(); val by = ev.values[1].toDouble(); val bz = ev.values[2].toDouble()
                 val b = sqrt(bx * bx + by * by + bz * bz)
-                if (b < 1.0) return
+                if (b < 1.0) { fieldAt = 0L; return }
+                fieldAt = now
                 val vUp = bx * up[0] + by * up[1] + bz * up[2]
                 val dip = Math.toDegrees(asin((-vUp / b).coerceIn(-1.0, 1.0)))
+                latestStrength = b; latestDip = dip
                 val k = 0.12
                 bStrength = if (bStrength.isNaN()) b else bStrength + k * (b - bStrength)
                 bDip = if (bDip.isNaN()) dip else bDip + k * (dip - bDip)
+                if (rotSensor == null && gameSensor == null) fuse(now)
             }
         }
     }
@@ -670,13 +737,17 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     /** How far the measured field is from Earth's expected field here: 0 = perfect. */
     private fun fieldError(): Pair<Double, Double>? {
         val g = geo ?: return null
-        if (bStrength.isNaN() || bDip.isNaN()) return null
+        if (!Reliability.fresh(SystemClock.elapsedRealtime(), fieldAt, Reliability.SENSOR_MAX_AGE_MS) ||
+            bStrength.isNaN() || bDip.isNaN()) return null
         val expected = g.fieldStrength / 1000.0       // nT -> µT
-        return Pair(abs(bStrength - expected) / expected, abs(bDip - g.inclination))
+        // An abrupt anomaly must not be hidden by the display smoothing filter.
+        return Pair(max(abs(bStrength - expected), abs(latestStrength - expected)) / expected,
+            max(abs(bDip - g.inclination), abs(latestDip - g.inclination)))
     }
 
     private fun evalQuality(): Q {
         val (se, de) = fieldError() ?: return Q.UNKNOWN
+        if ((geo?.horizontalStrength ?: 0f) < 5000f) return Q.BAD
         return when {
             se < 0.07 && de < 4.0 -> Q.GOOD
             se < 0.15 && de < 8.0 -> Q.FAIR
@@ -684,17 +755,19 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
     }
 
-    /** Android's own accuracy flag is unreliable on many phones, so a field that matches Earth's
-     *  expected strength AND dip also counts as calibrated (a badly calibrated sensor can't match both). */
-    private fun calibrated() = magAccuracy >= SensorManager.SENSOR_STATUS_ACCURACY_LOW || quality == Q.GOOD
+    // Matching strength and dip cannot prove azimuth accuracy or override calibration flags.
+    private fun calibrated() = magAccuracy >= SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM &&
+        rotAccuracy >= SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM
 
     private fun fuse(now: Long) {
         val g = geo ?: return
+        if (offset != null && !Reliability.fresh(now, anchorAt, Reliability.HOLD_MAX_AGE_MS)) resetFix()
         val gh = gameHeading
         val mh = magHeading
         quality = evalQuality()
-        if (gh == null || mh == null || now - magAt > 1500) return
-        val d = Astro.norm180(mh + g.declination - gh)
+        if (gh == null || mh == null || !Reliability.fresh(now, magAt, 100L) ||
+            !Reliability.fresh(now, gameAt, 100L)) return
+        val d = Astro.norm180(Reliability.trueHeading(mh, g.declination.toDouble()) - gh)
         val dt = if (lastFuse == 0L) 0.02 else min(0.5, (now - lastFuse) / 1000.0)
         lastFuse = now
         val follow = 1.0 - exp(-dt / 1.5)                // follow the compass with a ~1.5 s time constant
@@ -725,13 +798,14 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             } else if (!usableSingle) fairSince = 0L
             // BAD: ignore the compass completely; the gyroscope keeps the last good direction.
         }
+        if (quality == Q.GOOD && calibrated() || src == Src.FAIR && usableSingle && calibrated()) anchorAt = now
         collectForAverage(d, now)
     }
 
     /**
      * Indoors the field is slightly bent almost everywhere, but differently at each spot.
      * Because the gyroscope ties every reading to the same reference frame, estimates taken at
-     * different spots can be averaged: their errors point in different directions and largely cancel.
+     * different motion groups can be averaged. Shared magnetic bias does not cancel.
      * Readings are weighted by how well the field matches Earth's field there.
      */
     private fun collectForAverage(d: Double, now: Long) {
@@ -746,16 +820,17 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         if (bucketStart == 0L) bucketStart = now
         if (now - bucketStart < 1000) return
         bucketStart = now
+        val newBucket = accN >= 5 && accW > 0
         if (accN >= 5 && accW > 0) {
             val r = sqrt(accX * accX + accY * accY)
-            // which spot is this? Every ~2 real steps is a new spot. Without a motion sensor, fall back to
-            // distinct field values (less reliable: turning the phone can also change them).
+            // Motion groups are a heuristic, not proof of independent positions or errors.
             val bAvg = accB / accN; val dAvg = accDip / accN
-            val spot = if (linSensor != null) steps / 2 else (bAvg / 1.5).toInt() * 1000 + (dAvg / 1.0).toInt()
+            val spot = if (linSensor != null) steps / 2 else 0 // field changes alone cannot establish movement
             if (r > 0) buckets.addLast(Bucket(accX / r, accY / r, accW / accN, bAvg, dAvg, accAllGood, spot))
             while (buckets.size > 40) buckets.removeFirst()
         }
         accX = 0.0; accY = 0.0; accW = 0.0; accB = 0.0; accDip = 0.0; accN = 0; accAllGood = true
+        if (!newBucket) return // Old averages must never refresh an expired reference.
         if (method == "strict" || src == Src.GOOD || buckets.isEmpty()) return
         // 1) one direction estimate per spot (standing longer at one spot does not count more)
         class SpotEst(val x: Double, val y: Double, val w: Double)
@@ -765,7 +840,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             val r = sqrt(gx * gx + gy * gy).coerceAtLeast(1e-9)
             SpotEst(gx / r, gy / r, gw / g.size)
         }
-        // 2) combine the spots; their errors point in different directions and largely cancel
+        // 2) combine motion groups; agreement measures precision, not absolute accuracy
         var sx = 0.0; var sy = 0.0; var sw = 0.0
         for (e in perSpot) { sx += e.w * e.x; sy += e.w * e.y; sw += e.w }
         val n = perSpot.size
@@ -778,6 +853,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         avgSpotP = min(1.0, n / 5.0)
         avgErrP = if (stdErr.isNaN()) 0.0 else if (stdErr <= 2.0) 1.0 else 2.0 / stdErr
         if (n >= 5 && stdErr < 2.0) {
+            anchorAt = now
             offset = Astro.norm180(Math.toDegrees(atan2(sy, sx)))
             src = Src.AVG
         }
@@ -787,13 +863,22 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private fun spotsSeen(): Int = buckets.map { it.spot }.distinct().size
 
     private fun currentHeading(): Double? {
+        val now = SystemClock.elapsedRealtime()
+        quality = evalQuality()
+        if (!Reliability.fresh(now, locAt, Reliability.LOCATION_MAX_AGE_MS) ||
+            !Reliability.directionDefined(lat, lon, locAcc)) return null
+        if ((geo?.horizontalStrength ?: 0f) < 5000f) return null
+        if (!Reliability.fresh(now, magAt, Reliability.SENSOR_MAX_AGE_MS)) return null
         val o = offset
         val gh = gameHeading
-        if (gameSensor != null) return if (gh != null && o != null) Astro.norm360(gh + o) else null
+        if (gameSensor != null) return if (gh != null && magHeading != null && o != null &&
+            Reliability.fresh(now, gameAt, Reliability.SENSOR_MAX_AGE_MS) &&
+            Reliability.fresh(now, anchorAt, Reliability.HOLD_MAX_AGE_MS)) Astro.norm360(gh + o) else null
         // phone without gyroscope: plain corrected compass, only when the field looks clean
+        if (method == "average") return null
         val mh = magHeading ?: return null
         val g = geo ?: return null
-        return if (quality == Q.GOOD || quality == Q.FAIR) Astro.norm360(mh + g.declination) else null
+        return if (calibrated() && (quality == Q.GOOD || quality == Q.FAIR && method != "strict")) Reliability.trueHeading(mh, g.declination.toDouble()) else null
     }
 
     // ---------------------------------------------------------------- render
@@ -830,11 +915,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         avgMeter.barColor = if (done) GREEN else ORANGE
         avgMeter.invalidate()
         val pct = ((if (done) 1.0 else p) * 100).toInt()
-        val acc = if (avgStdErr.isNaN()) "" else String.format(Locale.US, "%.1f", max(1.0, 2.0 * avgStdErr))
         avgTv.setTextColor(if (done) GREEN else MUTED)
         avgTv.text = when {
-            done -> t("✓ Room average ready — from $n spots, about ±$acc° (keep walking to refine)",
-                      "✓ متوسط الغرفة جاهز — من $n أماكن، بدقة ±$acc° تقريبًا (واصل المشي لتحسينها)")
+            done -> t("✓ Room average ready — from $n motion groups; agreement does not prove accuracy",
+                      "✓ متوسط الغرفة جاهز — من $n مجموعات حركة؛ الاتفاق لا يثبت الدقة")
             buckets.isEmpty() && quality == Q.BAD -> t("Room average: paused — too much interference right here. Move a little.",
                                                      "متوسط الغرفة: متوقف — التشويش قوي هنا. تحرّك قليلًا.")
             n < 5 -> t("Room average $pct% — walk 2–3 steps to another spot ($n of 5 spots)",
@@ -853,20 +937,20 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val mins = (ev - now) / 60_000L
         val today = Instant.ofEpochMilli(ev).atZone(ZoneId.systemDefault()).toLocalDate() == Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
         sunCard.text = when {
-            abs(ev - now) <= 10 * 60_000L -> t("☀️ NOW: the sun is over the Kaaba. Every vertical shadow points exactly AWAY from the Qibla — compare it with the arrow!",
-                                               "☀️ الآن: الشمس فوق الكعبة. ظل أي شيء عمودي يشير بعكس اتجاه القبلة تمامًا — قارنه بالسهم!")
-            mins in 1..90 -> t("☀️ In $mins min ($time) the sun will be over the Kaaba: shadows will point exactly away from the Qibla.",
-                               "☀️ بعد $mins دقيقة ($time) تكون الشمس فوق الكعبة: ستشير الظلال بعكس اتجاه القبلة تمامًا.")
-            today -> t("☀️ Today at $time the sun is over the Kaaba. At that minute every shadow points exactly away from the Qibla — a natural check.",
-                       "☀️ اليوم الساعة $time تكون الشمس فوق الكعبة. في تلك الدقيقة يشير كل ظل بعكس اتجاه القبلة تمامًا — للتحقق الطبيعي.")
-            else -> t("☀️ Tomorrow at $time the sun is over the Kaaba — every shadow will point exactly away from the Qibla.",
-                      "☀️ غدًا الساعة $time تكون الشمس فوق الكعبة — سيشير كل ظل بعكس اتجاه القبلة تمامًا.")
+            abs(ev - now) <= 10 * 60_000L -> t("☀️ NOW: the sun is over the Kaaba. Every vertical shadow points approximately AWAY from the Qibla — compare it with the arrow!",
+                                               "☀️ الآن: الشمس فوق الكعبة. ظل أي شيء عمودي يشير بعكس اتجاه القبلة تقريبًا — قارنه بالسهم!")
+            mins in 1..90 -> t("☀️ In $mins min ($time) the sun will be over the Kaaba: shadows will point approximately away from the Qibla.",
+                               "☀️ بعد $mins دقيقة ($time) تكون الشمس فوق الكعبة: ستشير الظلال بعكس اتجاه القبلة تقريبًا.")
+            today -> t("☀️ Today at $time the sun is over the Kaaba. At that minute every shadow points approximately away from the Qibla — a natural check.",
+                       "☀️ اليوم الساعة $time تكون الشمس فوق الكعبة. في تلك الدقيقة يشير كل ظل بعكس اتجاه القبلة تقريبًا — للتحقق الطبيعي.")
+            else -> t("☀️ Tomorrow at $time the sun is over the Kaaba — every shadow will point approximately away from the Qibla.",
+                      "☀️ غدًا الساعة $time تكون الشمس فوق الكعبة — سيشير كل ظل بعكس اتجاه القبلة تقريبًا.")
         }
     }
 
     private fun render() {
-        val now = System.currentTimeMillis()
-        renderSunCard(now)
+        val now = SystemClock.elapsedRealtime()
+        renderSunCard(System.currentTimeMillis())
         if (lat.isNaN()) {
             qView.qiblaRel = null; qView.invalidate()
             turnTv.text = t("Finding your location…", "جارٍ تحديد موقعك…")
@@ -898,7 +982,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         meter.visibility = if (showMeter) View.VISIBLE else View.GONE
         meterTv.visibility = meter.visibility
         infoTv.visibility = if (detailed) View.VISIBLE else View.GONE
-        globe.visibility = if (detailed) View.VISIBLE else View.GONE
+        globe.visibility = if (detailed && q.isFinite()) View.VISIBLE else View.GONE
         if (detailed && (globe.userLat != lat || globe.userLon != lon)) {
             globe.userLat = lat; globe.userLon = lon
             globe.label = t("Shortest path over the Earth to Makkah · ", "أقصر طريق على سطح الأرض إلى مكة · ") +
@@ -913,11 +997,36 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             qView.qiblaRel = null; qView.sunRel = null; qView.ringColor = RING; qView.invalidate()
             matDial.qiblaRel = null; matDial.invalidate(); matTv.text = t("Finding the direction…", "جارٍ تحديد الاتجاه…")
             smX = Double.NaN
+            turnTv.setTextColor(INK)
             aligned = false
             when {
-                magSensor == null || rotSensor == null -> {
+                !Reliability.fresh(now, locAt, Reliability.LOCATION_MAX_AGE_MS) -> {
+                    turnTv.text = t("Location needs updating", "يجب تحديث الموقع")
+                    setStatus(t("Enable Location and allow access in Android settings. Saved coordinates may be out of date.",
+                        "فعّل الموقع واسمح بالوصول إليه في إعدادات أندرويد. قد تكون الإحداثيات المحفوظة قديمة."), ORANGE, ORANGE_SOFT)
+                }
+                !Reliability.directionDefined(lat, lon, locAcc) -> {
+                    turnTv.text = t("Direction is uncertain here", "الاتجاه غير مؤكد هنا")
+                    setStatus(t("Too close to the Kaaba, its opposite point, or a geographic pole for this location accuracy. Use a local reference.",
+                        "الموقع قريب من الكعبة أو النقطة المقابلة أو القطب. استخدم مرجعًا محليًا."), ORANGE, ORANGE_SOFT)
+                }
+                (geo?.horizontalStrength ?: 0f) < 5000f -> {
+                    turnTv.text = t("Magnetic north is unreliable here", "الشمال المغناطيسي غير موثوق هنا")
+                    setStatus(t("The horizontal magnetic field is too weak for reliable compass guidance. Use a local reference.",
+                        "المجال المغناطيسي الأفقي ضعيف جدًا لتوجيه موثوق. استخدم مرجعًا محليًا."), ORANGE, ORANGE_SOFT)
+                }
+                magSensor == null || rotSensor == null && accelSensor == null -> {
                     turnTv.text = t("No compass in this phone", "لا توجد بوصلة في هذا الهاتف")
                     setStatus(t("Use the web version's sun or wall lock instead.", "استخدم نسخة الويب (القفل بالشمس أو بالجدار) بدلًا من ذلك."), RED, RED_SOFT)
+                }
+                gameSensor == null && method == "average" -> {
+                    turnTv.text = t("Room average unavailable", "متوسط الغرفة غير متاح")
+                    setStatus(t("This mode requires a game rotation vector. Choose Smart or Strict in Settings for the available compass.",
+                        "يتطلب هذا الوضع حساس دوران نسبي. اختر الوضع الذكي أو الصارم في الإعدادات."), ORANGE, ORANGE_SOFT)
+                }
+                magHeading == null -> {
+                    turnTv.text = t("Hold the phone flat", "أمسك الهاتف بشكل مستوٍ")
+                    setStatus(t("Keep the screen facing up, away from metal and magnets.", "اجعل الشاشة لأعلى بعيدًا عن المعادن والمغناطيس."), ORANGE, ORANGE_SOFT)
                 }
                 !calibrated() -> {
                     turnTv.text = t("Calibrate the compass", "عايِر البوصلة")
@@ -930,8 +1039,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 }
                 quality == Q.BAD -> {
                     turnTv.text = t("Interference here", "يوجد تشويش هنا")
-                    setStatus(t("⚠ Something nearby is bending the magnetic field. Walk 1–2 m away from metal (cars, desks, steel doors or pillars, speakers, laptops). When the bar turns green, the spot is clean.",
-                                "⚠ شيء قريب يُشوّه المجال المغناطيسي. ابتعد مترًا أو مترين عن المعادن (السيارات، المكاتب، الأبواب أو الأعمدة الحديدية، السماعات، الحواسيب). عندما يصبح الشريط أخضر يكون المكان نظيفًا."), RED, RED_SOFT)
+                    setStatus(t("⚠ Something nearby is bending the magnetic field. Walk 1–2 m away from metal (cars, desks, steel doors or pillars, speakers, laptops). A green bar cannot rule out every source of interference.",
+                                "⚠ شيء قريب يُشوّه المجال المغناطيسي. ابتعد مترًا أو مترين عن المعادن (السيارات، المكاتب، الأبواب أو الأعمدة الحديدية، السماعات، الحواسيب). الشريط الأخضر لا يستبعد جميع مصادر التشويش."), RED, RED_SOFT)
+                }
+                gameSensor != null && offset != null && !Reliability.fresh(now, anchorAt, Reliability.HOLD_MAX_AGE_MS) -> {
+                    turnTv.text = t("Direction reference expired", "انتهت صلاحية مرجع الاتجاه")
+                    setStatus(t("Gyroscope-only direction can drift. Move away from metal to acquire a new compass reference.",
+                        "قد ينحرف اتجاه الجيروسكوب. ابتعد عن المعادن للحصول على مرجع جديد للبوصلة."), ORANGE, ORANGE_SOFT)
                 }
                 method == "strict" && quality == Q.FAIR -> {
                     turnTv.text = t("Waiting for a clean spot…", "بانتظار مكان نظيف…")
@@ -949,62 +1063,67 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             if (smX.isNaN()) { smX = c; smY = s } else { smX += 0.35 * (c - smX); smY += 0.35 * (s - smY) }
             val h = Astro.norm360(Math.toDegrees(atan2(smY, smX)))
             val diff = Astro.norm180(q - h)
+            val holding = quality != Q.GOOD || !calibrated()
+            val trustworthy = !holding && src != Src.AVG && src != Src.FAIR
+            val ok = abs(diff) <= 2.0 && trustworthy
             qView.qiblaRel = diff.toFloat()
             matDial.qiblaRel = diff.toFloat()
-            matDial.ringColor = Color.parseColor(if (abs(diff) <= 2.0) "#1F5C43" else "#1A2420")
+            matDial.ringColor = Color.parseColor(if (ok) "#1F5C43" else "#1A2420")
             matDial.invalidate()
-            matTv.text = if (abs(diff) <= 2.0) t("✓ Facing the Qibla", "✓ متجه إلى القبلة")
+            matTv.text = if (ok) t("✓ Facing the Qibla", "✓ متجه إلى القبلة")
                          else t("Turn ${abs(diff).toInt()}° ${if (diff > 0) "right" else "left"}", "استدر ${abs(diff).toInt()}° ${if (diff > 0) "يمينًا" else "يسارًا"}")
-            val (sunAz, sunAlt) = Astro.sun(now, lat, lon)
+            val (sunAz, sunAlt) = Astro.sun(System.currentTimeMillis(), lat, lon)
             qView.sunRel = if (sunAlt > 0 && sunAlt < 80) Astro.norm180(sunAz - h).toFloat() else null
 
-            val holding = quality == Q.BAD || !calibrated()
-            val ok = abs(diff) <= 2.0
-            qView.ringColor = when { holding -> ORANGE; ok -> GREEN; else -> RING }
+            qView.ringColor = when { !trustworthy -> ORANGE; ok -> GREEN; else -> RING }
             qView.invalidate()
             turnTv.setTextColor(if (ok) GREEN else INK)
             val deg = abs(diff).toInt()
             turnTv.text = when {
                 ok -> t("✓ You are facing the Qibla", "✓ أنت متجه إلى القبلة")
+                abs(diff) <= 2.0 -> t("Near the estimated Qibla — verify", "قريب من اتجاه القبلة التقديري — تحقق")
                 diff > 0 -> t("Turn $deg° right ↻", "استدر $deg° يمينًا ↻")
                 else -> t("Turn $deg° left ↺", "استدر $deg° يسارًا ↺")
             }
-            guide(diff, offsetFromGood || gameSensor == null || !holding, now)
+            guide(diff, trustworthy, now)
             aligned = ok
 
             val approx = src == Src.FAIR && gameSensor != null
             val spots = spotsSeen()
             when {
+                quality == Q.UNKNOWN -> setStatus(t("Recent reference only — field checks unavailable; direction may drift.",
+                    "مرجع حديث فقط — فحص المجال غير متاح وقد ينحرف الاتجاه."), ORANGE, ORANGE_SOFT)
                 !calibrated() -> setStatus(t("Holding the last good direction. Wave the phone in a figure‑8 to recalibrate the compass.",
-                                             "يتم الاحتفاظ بآخر اتجاه دقيق. حرّك الهاتف على شكل الرقم 8 لإعادة معايرة البوصلة."), ORANGE, ORANGE_SOFT)
+                                             "يتم الاحتفاظ باتجاه حديث قد ينحرف. حرّك الهاتف على شكل الرقم 8 لإعادة معايرة البوصلة."), ORANGE, ORANGE_SOFT)
                 quality == Q.BAD -> {
                     val mins = (now - lastGoodAt) / 60000
-                    setStatus(t("Interference here — the compass is being ignored. The gyroscope is holding the last accurate direction.",
-                                "يوجد تشويش هنا — تم تجاهل البوصلة، والجيروسكوب يحتفظ بآخر اتجاه دقيق.") +
+                    setStatus(t("Interference here — the compass is being ignored. The gyroscope is holding a recent direction (may drift).",
+                                "يوجد تشويش هنا — تم تجاهل البوصلة، والجيروسكوب يحتفظ باتجاه حديث قد ينحرف.") +
                         if (lastGoodAt == 0L || mins >= 2) t(" Step to a clean spot (green bar) to refresh.", " انتقل إلى مكان نظيف (شريط أخضر) للتحديث.") else "",
                         ORANGE, ORANGE_SOFT)
                 }
-                approx -> setStatus(t("Approximate. Walk slowly around the room with the phone flat — readings from different spots are averaged for accuracy (${min(spots, 5)} of 5 spots).",
-                                      "تقريبي. امشِ ببطء في الغرفة والهاتف مستوٍ — يتم دمج القراءات من أماكن مختلفة لزيادة الدقة (${min(spots, 5)} من 5 أماكن)."), ORANGE, ORANGE_SOFT)
-                src == Src.AVG -> setStatus(t("✓ Accurate — averaged from $avgSpots readings around this room",
-                                              "✓ دقيق — متوسط $avgSpots قراءة من أماكن مختلفة في هذه الغرفة"), GREEN, GREEN_SOFT)
-                quality == Q.FAIR -> setStatus(t("✓ Accurate — using the last clean reading (small disturbance here now).",
-                                                 "✓ دقيق — باستخدام آخر قراءة نظيفة (يوجد تشويش بسيط هنا الآن)."), GREEN, GREEN_SOFT)
-                else -> setStatus(t("✓ Accurate — magnetic field here is clean", "✓ دقيق — المجال المغناطيسي هنا نظيف"), GREEN, GREEN_SOFT)
+                approx -> setStatus(t("Approximate. Walk slowly around the room with the phone flat — readings from motion groups are averaged (shared bias may remain) (${min(spots, 5)} of 5 spots).",
+                                      "تقريبي. امشِ ببطء في الغرفة والهاتف مستوٍ — يتم دمج القراءات وقد يبقى انحياز مشترك (${min(spots, 5)} من 5 أماكن)."), ORANGE, ORANGE_SOFT)
+                src == Src.AVG -> setStatus(t("Approximate — averaged from $avgSpots readings around this room",
+                                              "تقريبي — متوسط $avgSpots قراءة من أماكن مختلفة في هذه الغرفة"), ORANGE, ORANGE_SOFT)
+                quality == Q.FAIR -> setStatus(t("Estimate — using a recent reference (small disturbance here now).",
+                                                 "تقدير — باستخدام مرجع حديث (يوجد تشويش بسيط هنا الآن)."), ORANGE, ORANGE_SOFT)
+                else -> setStatus(t("Field checks passed — verify away from metal", "اجتاز فحص المجال — تحقق بعيدًا عن المعادن"), GREEN, GREEN_SOFT)
             }
         }
 
         val dec = (g?.declination ?: 0f).toDouble()
         val km = String.format(Locale.US, "%,d", Astro.distanceKm(lat, lon).toInt())
         val decTxt = (if (dec >= 0) "+" else "") + f1(dec) + "°"
+        val qTxt = if (q.isFinite()) f1(q) + "°" else "—"
         infoTv.text = t(
-            "Qibla: ${f1(q)}° from true north · $km km to the Kaaba\n" +
+            "Qibla: $qTxt from true north · $km km to the Kaaba\n" +
             "Location: $locLabel (${f5(lat)}, ${f5(lon)})\n" +
-            "True-north correction (WMM): $decTxt\n" +
+            "True-north correction (Android model): $decTxt — model age depends on OS\n" +
             "Hold the phone flat. The small sun on the ring shows where the real sun is — a quick check.",
-            "القبلة: ${f1(q)}° من الشمال الحقيقي · $km كم إلى الكعبة\n" +
+            "القبلة: $qTxt من الشمال الحقيقي · $km كم إلى الكعبة\n" +
             "الموقع: $locLabel (${f5(lat)}, ${f5(lon)})\n" +
-            "تصحيح الشمال الحقيقي (WMM): $decTxt\n" +
+            "تصحيح الشمال الحقيقي: $decTxt — عمر النموذج يعتمد على النظام\n" +
             "أمسك الهاتف بشكل مستوٍ. الشمس الصغيرة على الحلقة تُظهر مكان الشمس الحقيقية — للتحقق السريع."
         )
     }

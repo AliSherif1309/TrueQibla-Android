@@ -46,4 +46,7 @@ android {
         jvmTarget = "17"
     }
 }
-// No external libraries: everything (sensors, GPS, World Magnetic Model) is built into Android.
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
+// No runtime libraries: sensors, location and the magnetic model use Android APIs.

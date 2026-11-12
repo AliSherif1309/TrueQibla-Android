@@ -2,7 +2,7 @@ package com.aly.trueqibla
 
 import kotlin.math.*
 
-/** Qibla, distance and sun position. Same formulas as the web app (tested there). */
+/** Qibla, distance and sun position. Spherical great-circle convention; regression tests are in src/test. */
 object Astro {
     const val KAABA_LAT = 21.422487
     const val KAABA_LON = 39.826206
@@ -14,15 +14,18 @@ object Astro {
 
     /** Great-circle bearing from (lat, lon) to the Kaaba, degrees clockwise from TRUE north. */
     fun qibla(lat: Double, lon: Double): Double {
+        if (!Reliability.coordinates(lat, lon) || abs(lat) == 90.0) return Double.NaN
         val p1 = lat * D2R
         val p2 = KAABA_LAT * D2R
         val dl = (KAABA_LON - lon) * D2R
         val y = sin(dl) * cos(p2)
         val x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)
+        if (hypot(x, y) < 1e-12) return Double.NaN // coincident or antipodal: no unique azimuth
         return norm360(atan2(y, x) * R2D)
     }
 
     fun distanceKm(lat: Double, lon: Double): Double {
+        if (!Reliability.coordinates(lat, lon)) return Double.NaN
         val r = 6371.0088
         val dp = (KAABA_LAT - lat) * D2R
         val dl = (KAABA_LON - lon) * D2R
