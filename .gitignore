@@ -7,3 +7,5 @@ local.properties
 *.keystore
 *.p12
 signing/
+__pycache__/
+*.pyc

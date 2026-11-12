@@ -24,21 +24,28 @@ jobs:
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            export SIGNING_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "A persistent signing keystore is required for in-app updates. Configure the SIGNING_KEYSTORE_BASE64 and SIGNING_* secrets."
+            exit 1
           fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          export SIGNING_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+          trap 'rm -f "$RUNNER_TEMP/release.jks"' EXIT
+          python -m unittest discover -s scripts -p 'test_*.py'
           gradle testDebugUnitTest lintDebug assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release.apk TrueQibla.apk
-          rm -f "$RUNNER_TEMP/release.jks"
+          python scripts/make_update_manifest.py TrueQibla.apk app/build/outputs/apk/release/output-metadata.json update.json
       - uses: actions/upload-artifact@v4
         with:
           name: TrueQibla-apk
-          path: TrueQibla.apk
-      - name: Publish as the "latest" release (direct download on the phone)
+          path: |
+            TrueQibla.apk
+            update.json
+      - name: Publish APK and update metadata together
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest TrueQibla.apk --title "True Qibla (latest build)" \
-            --notes "Build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7}). Download **TrueQibla.apk** on your Android phone and open it to install."
+          tag="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" TrueQibla.apk update.json --draft --target "$GITHUB_SHA" --title "True Qibla 1.6 (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7}). Includes in-app updates. Install **TrueQibla.apk** once; future releases can be downloaded from Settings inside the app. Android confirms installation."
+          gh release edit "$tag" --draft=false --latest

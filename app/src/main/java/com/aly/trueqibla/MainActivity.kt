@@ -164,6 +164,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var matDial: QiblaView
     private lateinit var matTv: TextView
     private var matMode = false
+    private lateinit var updates: AppUpdates
+    private var updateButton: TextView? = null
 
     // settings
     private val prefs by lazy { getSharedPreferences("qibla", MODE_PRIVATE) }
@@ -218,6 +220,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         window.decorView.systemUiVisibility = if (dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
 
         sm = getSystemService(SENSOR_SERVICE) as SensorManager
+        updates = AppUpdates(this, ar).apply { onChanged = { updateButton?.text = this.label } }
         lm = getSystemService(LOCATION_SERVICE) as LocationManager
         gameSensor = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
         rotSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -441,6 +444,15 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         })
         settingsView.addView(top)
 
+        settingsView.addView(sectionTitle(t("APP UPDATES", "تحديثات التطبيق")))
+        updateButton = TextView(this).apply {
+            text = updates.label; textSize = 16f; setTextColor(GREEN)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            isClickable = true
+            setOnClickListener { updates.click() }
+        }
+        settingsView.addView(updateButton)
+
         choiceGroup(t("METHOD", "طريقة التحديد"), listOf(
             Triple("smart", t("Smart (recommended)", "ذكي (موصى به)"),
                 t("Uses a clean reading when there is one; indoors it averages readings around the room. Shows a quick approximate arrow while it works.",
@@ -513,10 +525,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         settingsView.addView(TextView(this).apply {
             text = t("True Qibla $ver\n\nPoints to the Kaaba using the great-circle direction from your GPS position, corrected to true north. " +
                        "The gyroscope keeps the arrow steady, and the magnetic field is checked against Earth's expected field at your location, " +
-                       "but these checks cannot detect every magnetic disturbance.\n\nFree and open source (MIT License). No ads, no tracking.",
+                       "but these checks cannot detect every magnetic disturbance.\n\nChecks GitHub for app updates once a day when opened. Downloads start only when you choose Update.\n\nFree and open source (MIT License). No ads, no tracking.",
                      "القبلة الدقيقة $ver\n\nيشير إلى الكعبة باتجاه الدائرة العظمى من موقعك عبر GPS، مع التصحيح إلى الشمال الحقيقي. " +
                        "يحافظ الجيروسكوب على ثبات السهم، ويُقارَن المجال المغناطيسي بمجال الأرض المتوقع في موقعك، " +
-                       "لكن هذه الفحوص لا تكشف كل تشويش مغناطيسي.\n\nمجاني ومفتوح المصدر (رخصة MIT). بلا إعلانات ولا تتبّع.")
+                       "لكن هذه الفحوص لا تكشف كل تشويش مغناطيسي.\n\nيتحقق من تحديثات التطبيق عبر GitHub مرة يوميًا عند فتحه. يبدأ التنزيل فقط عند اختيار تحديث.\n\nمجاني ومفتوح المصدر (رخصة MIT). بلا إعلانات ولا تتبّع.")
             textSize = 14f; setTextColor(INK); setLineSpacing(0f, 1.15f); setPadding(dp(4), 0, dp(4), 0)
         })
         settingsView.addView(TextView(this).apply {
@@ -573,14 +585,21 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         startLocation()
         Reminders.scheduleNext(this)
         handler.post(ticker)
+        updates.onResume()
     }
 
     override fun onPause() {
         super.onPause()
+        updates.onPause()
         sm.unregisterListener(this)
         try { lm.removeUpdates(this) } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)
         vibrator?.cancel()
+    }
+
+    override fun onDestroy() {
+        updates.close()
+        super.onDestroy()
     }
 
     // ---------------------------------------------------------------- location

@@ -4,6 +4,8 @@ Audited 12 November 2026. This change improves conservative failure handling; it
 
 Repository baseline: `1c7a8f0d85bb94c6f67745ebb91b49bcd33bcff1`.
 
+This records the original compass reliability changes. Version 1.6 subsequently adds optional network-based app updates and installation permission; see [UPDATES.md](UPDATES.md) for that feature and its validation.
+
 ## Location and permissions
 
 Previously, an accurate early fix could reject all subsequent lower-accuracy fixes indefinitely, and GPS updates stopped after a <=20 m fix. The app could therefore keep directing from the wrong city after travel. Updates now continue only while resumed. An accuracy preference lasts 30 seconds; a newer, valid fix may then replace it. Out-of-order, future, >10 minute, missing-accuracy and non-finite fixes are rejected using elapsed realtime. Providers are handled independently so a missing/restricted provider cannot skip another. Coarse-only permission uses the network provider, without requiring Google Play Services. GPS requires fine permission.
