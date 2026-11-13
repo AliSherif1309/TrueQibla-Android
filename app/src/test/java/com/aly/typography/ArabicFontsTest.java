@@ -61,8 +61,11 @@ public class ArabicFontsTest {
         try {
             ArabicFonts.install(app);
             TextView text = new TextView(app); text.setText("سلام");
+            Typeface systemFont = text.getTypeface();
             ArabicFonts.watchRoot(text);
-            assertEquals(Typeface.DEFAULT, text.getTypeface());
+            assertSame(systemFont, text.getTypeface());
+            assertFalse(text.getText() instanceof Spanned && ((Spanned) text.getText())
+                .getSpans(0, text.length(), ArabicFonts.ArabicSpan.class).length > 0);
         } finally { file.delete(); ArabicFonts.install(app); }
     }
 }
