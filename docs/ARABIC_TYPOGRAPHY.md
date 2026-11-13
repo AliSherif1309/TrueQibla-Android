@@ -1,42 +1,22 @@
-# Arabic typography implementation status
+# Arabic typography
 
-## Preference and status
+Thmanyah Sans is the user's preferred Arabic UI font. Arabic runs use Regular, Medium or Bold; Latin text and numerals retain the original text paint. Existing spans, characters, editing selection, sizes and RTL direction are preserved. Dialog windows and dynamic labels are registered separately. Android widgets are excluded. SahlPDF's text-mode page view is excluded so reader font settings and PDF rendering keep their existing behavior.
 
-Thmanyah is the user's preferred Arabic typeface. Runtime integration is **not completed by this PR**. This PR records the preference, inspected integration points and required checks; it does not add fonts, change UI typography or certify existing packaging.
+## Offline packaging and source
 
-## Official source and licensing review
+Per the user's instruction to reuse their existing SahlTV approach, tools/prepare_thmanyah.py copies the already-obfuscated r/m/b assets from their published SahlTV build-48 APK. The APK and all selected payloads are pinned by SHA-256. Metadata inspected in memory identifies thmanyah sans Regular/Medium/Bold, version 1.003. No font modifications or raw font files are committed. Gradle stages assets into app/build/generated/thmanyah/assets and fails if the source or payload checksums differ. No FONT_KEY secret needs copying and SahlTV is unchanged.
 
-Reviewed 2026-11-13:
-- Official family page: https://font.thmanyah.com/
-- Controlling Arabic license: https://font.thmanyah.com/licenses
-- English translation: https://font.thmanyah.com/licenses-en
+The first build needs Python 3 and network access to the pinned GitHub release. Subsequent builds can reuse .gradle/thmanyah/SahlTV-build-48.apk. To provision without network, copy the verified APK there, or run the preparation script with --source-apk and --output. The installed app never downloads fonts; it loads them into private no-backup storage using SahlTV's format. Missing or corrupt assets/cache fall back to system typography without crashing.
 
-The official page advertises Sans, Serif Display and Serif Text, five weights each. The download uses an email form. No new download was submitted; actual downloadable filenames, current version, checksums and glyph coverage remain unverified.
+Official family: https://font.thmanyah.com/
+Controlling Arabic license: https://font.thmanyah.com/licenses
+English translation: https://font.thmanyah.com/licenses-en
 
-The license permits personal/commercial app use and embedding in compiled, packaged or obfuscated products. It also restricts sharing/hosting font files, independent extraction/reuse, modification and derivatives. Only written exceptions from Thmanyah are effective; the Arabic text prevails. App-use permission is not blanket permission to place raw font files in GitHub.
+Thmanyah permits app use and compiled/packaged/obfuscated embedding, but restricts raw-file sharing and independent extraction. The user requested reuse of their existing packaged implementation and confirmed they have no separate written permission. This implementation follows that instruction; it does not certify that obfuscation satisfies every distribution restriction. The font remains separately licensed by Thmanyah; the repository's software license does not relicense the font. Do not export, modify or redistribute raw font files. Acquire future updates from the official source and review applicable terms before changing distribution.
 
-The user has confirmed that they have no separate written permission and requested SahlTV's packaging approach. SahlTV's encrypted repository assets plus obfuscated APK assets are the architectural reference, but runtime reconstruction with an embedded key does not by itself establish compliance with the extraction restriction. Obtain clarification covering repository storage, CI processing, APK distribution and runtime extraction before expanding font distribution. Do not infer permission from existing code or use base64/XOR/encryption as a substitute for permission.
+## Checks
 
-## Inspected repository
-
-The main UI is programmatic Kotlin in `app/src/main/java/com/aly/trueqibla/MainActivity.kt`, with explicit bold Typeface calls and English/Arabic strings. No bundled font files were found. Cover settings, sensor guidance, reminders, and custom-drawn compass labels without changing numerical or direction calculations.
-
-## Integration requirements after clearance
-
-1. Obtain official, authorized font files and record version, weights, source, SHA-256 and applicable permission; preserve notices. Do not publish font binaries or secret keys.
-2. Configure an authorized protected build input. Repository secrets cannot be read or transferred from SahlTV by this task. Use an offline runtime package and private no-backup storage; no runtime font download.
-3. Use Sans for ordinary Arabic UI; opt into Display/Text by semantic role. Preserve Latin and monospace typography in mixed text, explicit Quran fonts, document rendering and third-party views. Preserve weight and span behavior.
-4. Handle dynamic views, changed text, editable inputs, hints, dialogs, popup windows and service-owned views where applicable. Keep system-font fallback when font provisioning fails.
-5. Submit a separate implementation PR with the following evidence. Keep it unmerged until relevant CI passes.
-
-## Required acceptance checks
-
-- Automated: Arabic-run selection including diacritics and supplementary Arabic characters; mixed Arabic/Latin/numerals; normal/medium/bold; preserved existing spans; no repeated scaling; missing/corrupt assets; release packaging excludes raw font files and keys.
-- Device: Arabic and English locales, RTL, long labels, menus/dialogs/inputs, text updates, supported API levels, large accessibility fonts, no clipping and consistent baselines.
-- Offline: cold start and relaunch in airplane mode, with expected font assets present; separately prove system fallback with them absent.
-- Regression: existing unit tests, lint and build; relevant rendering/instrumentation tests. Record exact commands, commit and CI run URLs.
-- Security/licensing: inspect repository diff and final APK contents; verify authorized distribution conditions. Obfuscation is not a compliance test.
-
-## Validation of this PR
-
-Read-only inspection of the default-branch file tree, README, manifest and main UI/theme files. No runtime code changes; no Android build, device tests or font binary verification were performed. Existing CI status must be checked on this PR; documentation checks cannot prove typography integration.
+- python -m unittest discover -s tools -p test_prepare_thmanyah.py
+- Android unit tests include Unicode ranges, mixed text, unchanged non-Arabic typeface, existing spans, dynamic edits, hints, stable span counts, selection and corrupt-cache fallback.
+- Run the repository's Android unit-test, lint and build tasks. Check the resulting APK with python tools/prepare_thmanyah.py --check-apk PATH_TO_APK. This verifies exact offline font payloads and rejects raw Thmanyah font filenames.
+- Device acceptance still requires Arabic/English locales, RTL, long labels/dialogs, large accessibility fonts, clipping and airplane-mode cold launches. CI packaging and Robolectric checks do not replace those visual checks.

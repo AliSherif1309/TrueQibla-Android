@@ -12,7 +12,7 @@
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 
-    <application
+    <application android:name="com.aly.typography.ArabicApplication"
         android:usesCleartextTraffic="false"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -42,3 +42,4 @@
         </receiver>
     </application>
 </manifest>
+

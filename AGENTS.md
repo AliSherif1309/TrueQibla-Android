@@ -1,10 +1,8 @@
-# Arabic typography preference
+# Arabic typography
 
-- The user's preferred Arabic font is Thmanyah from https://font.thmanyah.com/.
-- Prefer Thmanyah Sans for Arabic app UI, Serif Display for prominent headings, and Serif Text for long reading passages when appropriate.
-- Use SahlTV-Launcher as the architectural reference: offline assets, build-time secret, private runtime font loading, and graceful system-font fallback. Do not claim that obfuscation alone establishes license compliance.
-- Preserve suitable Latin typography, monospace codes, existing Quran/document fonts, text editing spans, accessibility scaling, and RTL behavior. Do not change source document content.
-- Before adding or copying font assets, resolve the distribution restrictions documented in docs/ARABIC_TYPOGRAPHY.md. Do not publish raw fonts or keys, or copy encrypted font payloads into new repositories without confirmed distribution rights.
-- Font acquisition must use the official source; do not scrape demo web fonts, modify/subset the font, or use third-party mirrors.
-- Validate Arabic and mixed Arabic/English text, dynamic labels, inputs, dialogs, menus, clipping, RTL and offline operation. Add meaningful automated coverage when changing runtime typography.
-- Submit changes through a pull request. Do not merge or enable automatic merge; required CI must pass before any separately authorized merge.
+- Use the bundled Thmanyah Sans for Arabic UI; preserve the existing Latin fonts, monospace codes and document fonts.
+- Read docs/ARABIC_TYPOGRAPHY.md before changing typography or the pinned font input.
+- Use ArabicFonts.watch for separately created windows; use the Arabic dialog builders for new dialogs. Service-owned views need watchRoot.
+- Preserve text, spans, selection, accessibility font sizes, weights and RTL behavior. Do not restyle third-party Android widgets or PDF page/text-mode content.
+- Do not commit raw fonts or keys. Keep acquisition at build time and runtime typography offline. The packaged-font format follows the user's SahlTV implementation; obfuscation is not proof of license compliance.
+- Run typography tests, Android unit tests/lint/build and the final APK asset check. Submit a PR and merge only after relevant CI passes and the user authorizes merging.
