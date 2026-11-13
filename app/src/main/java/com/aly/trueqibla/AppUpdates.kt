@@ -144,7 +144,7 @@ class AppUpdates(private val activity: Activity, private val arabic: Boolean) {
     private fun showOffer() {
         val next = offer ?: return
         dialog?.dismiss()
-        dialog = AlertDialog.Builder(activity).setTitle(t("Update available", "تحديث متاح"))
+        dialog = com.aly.typography.ArabicDialogBuilder(activity).setTitle(t("Update available", "تحديث متاح"))
             .setMessage(t("True Qibla ${next.version} is ready. Download it now? Android will ask you to confirm installation.",
                 "الإصدار ${next.version} متاح. هل تريد تنزيله الآن؟ سيطلب أندرويد تأكيد التثبيت."))
             .setNegativeButton(t("Later", "لاحقًا"), null)
@@ -238,7 +238,7 @@ class AppUpdates(private val activity: Activity, private val arabic: Boolean) {
                     busy = false; ready = true; onChanged?.invoke()
                     if (resumed) {
                         dialog?.dismiss()
-                        dialog = AlertDialog.Builder(activity).setTitle(t("Update downloaded", "تم تنزيل التحديث"))
+                        dialog = com.aly.typography.ArabicDialogBuilder(activity).setTitle(t("Update downloaded", "تم تنزيل التحديث"))
                             .setMessage(t("Ready to install. Your settings will be kept.", "جاهز للتثبيت. سيتم الاحتفاظ بإعداداتك."))
                             .setNegativeButton(t("Later", "لاحقًا"), null)
                             .setPositiveButton(t("Install", "تثبيت")) { _, _ -> install() }.show()
@@ -273,3 +273,4 @@ class AppUpdates(private val activity: Activity, private val arabic: Boolean) {
 
     private fun post(block: () -> Unit) { handler.post { if (!closed) block() } }
 }
+
