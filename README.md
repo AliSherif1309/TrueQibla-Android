@@ -50,13 +50,13 @@ Release signing uses these repository secrets (never commit the keystore):
 `SIGNING_KEYSTORE_BASE64`, `SIGNING_STORE_PASSWORD`, `SIGNING_KEY_PASSWORD`, `SIGNING_KEY_ALIAS`.
 
 ## Build and verify
-Use Java 17, Gradle 8.7 and Android SDK 34:
+Use Java 17 and Android SDK 34. The checked-in wrapper downloads and verifies Gradle 8.7:
 
 ```sh
-gradle testDebugUnitTest lintDebug assembleDebug --no-daemon
+./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon
 ```
 
-The repository has Gradle wrapper configuration but no wrapper executable/JAR, so use an installed Gradle 8.7. Pull requests run verification; release builds run tests and lint before publication. Physical sensor accuracy still requires device testing.
+On Windows use `gradlew.bat` instead of `./gradlew`. The wrapper JAR and distribution are checked against official Gradle checksums. Pull requests run verification; release builds run tests and lint before publication. Physical sensor accuracy still requires device testing.
 
 ## License
 [MIT](LICENSE): free to use, share and improve. Please keep the copyright notice.

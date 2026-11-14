@@ -22,11 +22,9 @@ jobs:
         with:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
       - name: Packaging input checks
         run: python -m unittest discover -s tools -p test_prepare_thmanyah.py
       - name: Android typography tests, lint and debug build
-        run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+        run: bash gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
       - name: Verify offline APK font assets
         run: python tools/prepare_thmanyah.py --check-apk app/build/outputs/apk/debug/app-debug.apk

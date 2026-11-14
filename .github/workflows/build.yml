@@ -15,8 +15,6 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
       - name: Build signed release APK
         env:
           KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
@@ -32,7 +30,7 @@ jobs:
           export SIGNING_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
           trap 'rm -f "$RUNNER_TEMP/release.jks"' EXIT
           python -m unittest discover -s scripts -p 'test_*.py'
-          gradle testDebugUnitTest lintDebug assembleRelease --no-daemon
+          bash gradlew testDebugUnitTest lintDebug assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release.apk TrueQibla.apk
           python scripts/make_update_manifest.py TrueQibla.apk app/build/outputs/apk/release/output-metadata.json update.json
       - uses: actions/upload-artifact@v4
@@ -46,6 +44,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="build-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" TrueQibla.apk update.json --draft --target "$GITHUB_SHA" --title "True Qibla 1.6 (build ${GITHUB_RUN_NUMBER})" \
+          version="$(python -c 'import json; print(json.load(open("update.json"))["versionName"])')"
+          gh release create "$tag" TrueQibla.apk update.json --draft --target "$GITHUB_SHA" --title "True Qibla ${version} (build ${GITHUB_RUN_NUMBER})" \
             --notes "Build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7}). Includes in-app updates. Install **TrueQibla.apk** once; future releases can be downloaded from Settings inside the app. Android confirms installation."
           gh release edit "$tag" --draft=false --latest
